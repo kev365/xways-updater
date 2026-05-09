@@ -23,7 +23,9 @@ X-Ways install as an X-tension.
 
 ## Requirements
 
-- **X-Ways Forensics** - only tested for 21.0 or newer.  
+- **Windows (x64).** Should work on any 64-bit Windows that runs X-Ways
+  (Win 10, Win 11, Windows Server). Only x64 is tested.
+- **X-Ways Forensics** - only tested for 21.0 or newer.
 - **A valid X-Ways license** - Dongle or BYOD license.
 
 ## Authentication
