@@ -19,10 +19,6 @@
 //    - BYOD   main exe inside xwb.zip:           xwb64.exe
 //    Folder-name auto-detection reads VERSIONINFO from whichever of those
 //    two is present after extraction.
-//
-//  References:
-//    docs/xtension-invocation.md — entry points, sidecar pattern
-//    bulk_extractor.cpp           — closest in-tree precedent (dialog, sidecar)
 // =============================================================================
 
 #define NOMINMAX
@@ -3597,7 +3593,7 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
     case WM_COMMAND: {
         WORD ctlId = LOWORD(wp);
         if (ctlId == IDC_ABOUT_LINK_GITHUB) {
-            ShellExecuteW(hDlg, L"open", L"https://github.com/kev365",
+            ShellExecuteW(hDlg, L"open", L"https://github.com/kev365/xways-updater",
                           nullptr, nullptr, SW_SHOWNORMAL);
             return TRUE;
         }

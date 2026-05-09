@@ -106,7 +106,7 @@ BEGIN
     LTEXT     "Author:",                                        IDC_ABOUT_LABEL_AUTHOR_PREFIX, 12, 44,  30, 9
     LTEXT     "Kevin Stokes - Digital Detective and Cyber Sleuth",
                                                                 IDC_ABOUT_AUTHOR,       44,  44, 224,  9
-    PUSHBUTTON "https://github.com/kev365",                     IDC_ABOUT_LINK_GITHUB,  12,  58, 256, 14
+    PUSHBUTTON "https://github.com/kev365/xways-updater",       IDC_ABOUT_LINK_GITHUB,  12,  58, 256, 14
     PUSHBUTTON "https://www.linkedin.com/in/dfir-kev",          IDC_ABOUT_LINK_LINKEDIN,12,  76, 256, 14
     // Coffee button text is set programmatically in WM_INITDIALOG so we can
     // include the ♥ U+2665 hearts without relying on rc.exe's codepage.

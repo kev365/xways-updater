@@ -25,6 +25,7 @@
 *.ntvs*
 *.njsproj
 *.sln.iml
+*.bat
 
 # -----------------------------------------------------------------------------
 #  Sidecar config — DPAPI-encrypted user credentials. NEVER commit.
