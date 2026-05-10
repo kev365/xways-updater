@@ -50,7 +50,7 @@
 
 // --- Identity ---------------------------------------------------------------
 static const wchar_t* NAME        = L"xways-updater";
-static const wchar_t* VERSION     = L"0.1.0";
+static const wchar_t* VERSION     = L"0.1.1";
 static const wchar_t* DESCRIPTION = L"Download and install X-Ways Forensics (Dongle or BYOD) plus optional resources.";
 
 // Verbose per-file/per-step diagnostics. Off by default for shipped builds —
@@ -79,7 +79,7 @@ static const wchar_t* URL_AFF4            = L"https://www.x-ways.net/res/aff4-xw
 //   space, so the URL is percent-encoded.
 static const wchar_t* URL_COND_COLORING   = L"https://www.x-ways.net/res/conditional%20coloring/Conditional%20Coloring.cfg";
 
-static const wchar_t* USER_AGENT          = L"xways-updater/0.1.0 (X-Tension)";
+static const wchar_t* USER_AGENT          = L"xways-updater/0.1.1 (X-Tension)";
 
 // --- XT_Prepare nOpType ----------------------------------------------------
 enum : DWORD {
@@ -2066,10 +2066,11 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             Log(L"No xways-updater.ico found (looked in: " + tried + L"). Drop a 16x16+32x32 .ico file at one of those paths to set the title icon — no rebuild needed.");
         }
 
-        // License radio — default to detected license type when the cfg
-        // doesn't override it (cfg's licenseType is loaded from prior runs).
-        bool defaultByod = (c.licenseType == L"byod") ||
-                           (c.licenseType.empty() && ds->running.isByod);
+        // License radio — XT_Prepare always sets cfg.licenseType to match
+        // the running X-Ways flavor, so this radio anchors to whatever's
+        // currently in use. Toggling within the dialog still works for
+        // cross-license testing; the next session re-anchors to running.
+        bool defaultByod = (c.licenseType == L"byod");
         SetCheck(hDlg, IDC_RADIO_DONGLE, !defaultByod);
         SetCheck(hDlg, IDC_RADIO_BYOD,    defaultByod);
 
@@ -3672,14 +3673,22 @@ LONG __stdcall XT_Prepare(HANDLE /*hVolume*/, HANDLE /*hEvidence*/, LONG nOpType
     s.cfg = LoadCfg();
     s.running = DetectRunningInstall();
     g_lastRunning = &s.running;
+
+    // Always anchor the dialog's license-type radio to the currently-running
+    // X-Ways flavor, overriding whatever was saved in cfg from a prior
+    // session. Rationale: the running install IS the user's license, so
+    // defaulting to the matching download type is what they want 99% of the
+    // time. If they want to download the OTHER flavor for testing, they
+    // toggle the radio for that session — saved cfg gets overwritten on
+    // next load anyway. Falls through to "dongle" if no running install is
+    // detected (e.g. if isByod is false for any reason).
+    s.cfg.licenseType = s.running.isByod ? L"byod" : L"dongle";
+
     {
-        // The first-run default install base depends on license type:
-        // saved cfg wins; otherwise lean on the running install's type.
         // Note: "Effective install base" is logged AFTER the dialog closes
         // so it reflects the user's actual choice (which may differ from
         // the default if they typed a path or toggled license type).
-        bool defaultByod = (s.cfg.licenseType == L"byod") ||
-                           (s.cfg.licenseType.empty() && s.running.isByod);
+        bool defaultByod = (s.cfg.licenseType == L"byod");
         std::wstring xwDir = GetXWaysInstallDir();
         std::wstring fallback = GetDefaultInstallBase(defaultByod);
         if (s.cfg.installBase.empty()) s.cfg.installBase = fallback;
@@ -3687,10 +3696,6 @@ LONG __stdcall XT_Prepare(HANDLE /*hVolume*/, HANDLE /*hEvidence*/, LONG nOpType
         Log(L"Default install base: " + fallback);
     }
     Log(FormatRunningSummary(s.running));
-
-    // If user hasn't picked a license type yet (no prior cfg), auto-default
-    // to the running install's type — feeds into the dialog's radio button.
-    if (s.cfg.licenseType.empty()) s.cfg.licenseType = s.running.isByod ? L"byod" : L"dongle";
 
     // The dialog now hosts the install worker itself: clicking Install spawns
     // a worker thread that posts WM_APP_PROGRESS / WM_APP_DONE to the dialog
