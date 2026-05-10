@@ -4,6 +4,8 @@ X-Tension installer/updater for X-Ways Forensics, inspired by Eric Zimmerman's
 [XWFIM](https://ericzimmerman.github.io/) but living inside an existing
 X-Ways install as an X-tension.
 
+<img src="https://github.com/kev365/xways-updater/blob/main/xways-updater.png" alt="xways-updater" style="width:70%; height:auto;">
+
 ## What it does
 
 - Downloads the requested version of the **main app** (Dongle or BYOD).
