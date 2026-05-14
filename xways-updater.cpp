@@ -50,7 +50,7 @@
 
 // --- Identity ---------------------------------------------------------------
 static const wchar_t* NAME        = L"xways-updater";
-static const wchar_t* VERSION     = L"0.1.1";
+static const wchar_t* VERSION     = L"0.1.2";
 static const wchar_t* DESCRIPTION = L"Download and install X-Ways Forensics (Dongle or BYOD) plus optional resources.";
 
 // Verbose per-file/per-step diagnostics. Off by default for shipped builds —
@@ -79,7 +79,7 @@ static const wchar_t* URL_AFF4            = L"https://www.x-ways.net/res/aff4-xw
 //   space, so the URL is percent-encoded.
 static const wchar_t* URL_COND_COLORING   = L"https://www.x-ways.net/res/conditional%20coloring/Conditional%20Coloring.cfg";
 
-static const wchar_t* USER_AGENT          = L"xways-updater/0.1.1 (X-Tension)";
+static const wchar_t* USER_AGENT          = L"xways-updater/0.1.2 (X-Tension)";
 
 // --- XT_Prepare nOpType ----------------------------------------------------
 enum : DWORD {
@@ -1475,6 +1475,31 @@ static bool CopyTreeShellApi(const std::wstring& src, const std::wstring& dst) {
     return rc == 0 && !op.fAnyOperationsAborted;
 }
 
+// Recursively copy the *contents* of srcDir into dstDir (NOT srcDir itself).
+// Existing destination files are overwritten. dstDir is created if needed.
+// Returns true if every file copied successfully. Used for the AFF4 merge
+// where the zip's `ImageIOAFF4.dll` + `x64\ImageIOAFF4.dll` layout has to
+// land flat in the install dir alongside X-Ways' own root + x64\ files.
+static bool MergeTreeContents(const std::wstring& srcDir, const std::wstring& dstDir) {
+    SHCreateDirectoryExW(nullptr, dstDir.c_str(), nullptr);
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((srcDir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        std::wstring srcChild = JoinPath(srcDir, fd.cFileName);
+        std::wstring dstChild = JoinPath(dstDir, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!MergeTreeContents(srcChild, dstChild)) ok = false;
+        } else {
+            if (!CopyFileW(srcChild.c_str(), dstChild.c_str(), /*failIfExists=*/FALSE)) ok = false;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
 // --- Shortcut creation ------------------------------------------------------
 //   Standard IShellLinkW + IPersistFile recipe. SLDF_RUNAS_USER sets the
 //   "Run as administrator" advanced-properties checkbox so the .lnk requests
@@ -2157,7 +2182,8 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
                     L"  - *.tpl files (hex-editor templates) — only if not already in the new install\n"
                     L"  - *.dlg files (saved dialog selections)\n"
                     L"  - investigator.ini\n"
-                    L"  - Passwords.txt";
+                    L"  - Passwords.txt\n"
+                    L"  - Programs.txt";
                 TOOLINFOW ti{};
                 ti.cbSize   = sizeof(ti);
                 ti.uFlags   = TTF_IDISHWND | TTF_SUBCLASS;
@@ -3308,21 +3334,55 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
         if (s.cfg.dlTesseract) downloadAndExtract(URL_TESSERACT, L"Tesseract", finalInstallDir);
         if (s.cfg.dlExcire)    downloadAndExtract(URL_EXCIRE,    L"Excire",    finalInstallDir);
         if (s.cfg.dlAFF4) {
-            // AFF4 is itself an X-Tension; extract under xtensions\<stem>\
-            // (where <stem> = aff4-xways-2.1.1 or whatever URL_AFF4 points
-            // at) so X-Ways treats it like any other per-X-Tension subfolder.
-            std::wstring aff4Url = URL_AFF4;
-            size_t s2 = aff4Url.find_last_of(L'/');
-            std::wstring aff4Filename = (s2 != std::wstring::npos) ? aff4Url.substr(s2 + 1) : aff4Url;
-            aff4Filename = UrlDecode(aff4Filename);
-            std::wstring aff4Stem = aff4Filename;
-            if (aff4Stem.size() >= 4 &&
-                _wcsicmp(aff4Stem.c_str() + aff4Stem.size() - 4, L".zip") == 0) {
-                aff4Stem.erase(aff4Stem.size() - 4);
+            // AFF4 ships as four DLLs that X-Ways looks for in fixed
+            // locations under the install root:
+            //   <install>\ImageIOAFF4.dll     (32-bit, paired with xwforensics.exe)
+            //   <install>\libaff4lite.dll     (32-bit dependency)
+            //   <install>\x64\ImageIOAFF4.dll (64-bit, paired with xwforensics64.exe)
+            //   <install>\x64\libaff4lite.dll (64-bit dependency)
+            // The DLLs must NOT live under xtensions\... — X-Ways resolves
+            // ImageIOAFF4.dll by GetModuleFileName(NULL) + dirname (plus x64\
+            // for the 64-bit build), not from the xtensions auto-load path.
+            //
+            // Extract to a scratch dir, then merge the tree into the install
+            // dir. Handles both flat zips (DLLs at zip root + x64\ subdir)
+            // and wrapped zips (everything inside a top-level aff4-xways-N/
+            // folder).
+            std::wstring aff4Scratch = JoinPath(tempDir, L"aff4-stage");
+            if (downloadAndExtract(URL_AFF4, L"AFF4", aff4Scratch)) {
+                std::wstring aff4Root = aff4Scratch;
+                bool foundRoot = FileExists(JoinPath(aff4Root, L"ImageIOAFF4.dll"))
+                              || DirExists (JoinPath(aff4Root, L"x64"));
+                if (!foundRoot) {
+                    // Try one level deeper for wrapped zips.
+                    WIN32_FIND_DATAW fd{};
+                    HANDLE hF = FindFirstFileW((aff4Root + L"\\*").c_str(), &fd);
+                    if (hF != INVALID_HANDLE_VALUE) {
+                        do {
+                            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                            std::wstring cand = JoinPath(aff4Root, fd.cFileName);
+                            if (FileExists(JoinPath(cand, L"ImageIOAFF4.dll"))
+                                || DirExists(JoinPath(cand, L"x64"))) {
+                                aff4Root = cand;
+                                foundRoot = true;
+                                break;
+                            }
+                        } while (FindNextFileW(hF, &fd));
+                        FindClose(hF);
+                    }
+                }
+                if (!foundRoot) {
+                    Log(L"    AFF4: couldn't locate ImageIOAFF4.dll/x64 in extracted zip; skipping deploy.");
+                } else {
+                    Log(L"  AFF4: deploying to install root + x64\\ subdir...");
+                    if (MergeTreeContents(aff4Root, finalInstallDir)) {
+                        Log(L"    AFF4: done.");
+                    } else {
+                        Log(L"    AFF4: one or more files failed to copy.");
+                    }
+                }
             }
-            std::wstring aff4Dest = JoinPath(JoinPath(finalInstallDir, L"xtensions"), aff4Stem);
-            SHCreateDirectoryExW(nullptr, aff4Dest.c_str(), nullptr);
-            downloadAndExtract(URL_AFF4, L"AFF4", aff4Dest);
         }
     } else {
         Log(L"  Mode = main app only; skipping optional downloads.");
@@ -3352,8 +3412,9 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
     ProgressBeginMarquee(L"Finalizing install...");
 
     // Copy custom configs from the current install. Two policies:
-    //   - cfg + investigator.ini + Passwords.txt: OVERWRITE — these are the
-    //     user's saved state and should win over upstream defaults.
+    //   - cfg + investigator.ini + Passwords.txt + Programs.txt: OVERWRITE —
+    //     these are the user's saved state and should win over upstream
+    //     defaults.
     //   - *.tpl (hex-editor templates): KEEP UPSTREAM — the new install ships
     //     fresh upstream templates; only fill in templates that don't already
     //     exist in the destination (custom user templates carry forward).
@@ -3365,7 +3426,7 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
     if (s.cfg.copyCfg && DirExists(curInstall) &&
         _wcsicmp(curInstall.c_str(), finalInstallDir.c_str()) != 0) {
         Log(L"  Copying custom configs from current install: " + curInstall);
-        for (const wchar_t* name : { L"investigator.ini", L"Passwords.txt" }) {
+        for (const wchar_t* name : { L"investigator.ini", L"Passwords.txt", L"Programs.txt" }) {
             std::wstring src = JoinPath(curInstall, name);
             if (!FileExists(src)) continue;
             std::wstring dst = JoinPath(finalInstallDir, name);
