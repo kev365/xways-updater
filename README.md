@@ -71,6 +71,7 @@ X-Ways → **Tools → Run X-Tensions...** → select
 
 ## To Do:
 - Add downloading of the NSRL Hash DBs, they seem to have disappeared as of this update, so I don't have the links.
+- I'd like to find an easier way to detect downloaded service release versions.
 
 ## Disclaimer
 
