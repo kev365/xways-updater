@@ -69,6 +69,9 @@ X-Ways → **Tools → Run X-Tensions...** → select
 `xtensions\xways-updater\xways-updater.dll`. Pick your settings, click
 **Install**.
 
+## To Do:
+- Add downloading of the NSRL Hash DBs, they seem to have disappeared as of this update, so I don't have the links.
+
 ## Disclaimer
 
 This is a community-developed X-Tension. It is **not** affiliated with,
