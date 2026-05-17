@@ -13,7 +13,14 @@ X-Ways install as an X-tension.
   `xwf21-7sr3`, `xwb21-8-beta5` — read from the binary's VERSIONINFO and/or
   the session-start banner X-Ways writes to `msglog.txt`).
 - Optionally pulls **Viewer Component**, **Tesseract**, **Excire**,
-  **AFF4 X-Tension**, and **Conditional Coloring.cfg**.
+  **AFF4 X-Tension**, and a **Conditional Coloring.cfg** — tri-state checkbox
+  picks the source: checked = SANS FOR500 build by Michael Yasumoto
+  ([`peacekeeper0/X-Ways-Forensics`](https://github.com/peacekeeper0/X-Ways-Forensics));
+  indeterminate = upstream `x-ways.net`; unchecked = skip. When **Copy custom
+  configs** is on and the current install already has a `Conditional Coloring.cfg`,
+  the freshly downloaded one wins — the old copy is preserved as
+  `Conditional Coloring.cfg.old` (or `.old2`, `.old3`, ...) when its SHA-256
+  differs (identical copies are silently skipped).
 - Optionally **copies** `*.cfg`, `*.dlg`, `*.tpl`, `investigator.ini`, and
   `Passwords.txt` from the current install (per-policy: cfg/ini/Passwords
   overwrite; tpl is keep-upstream so user-only templates carry forward).

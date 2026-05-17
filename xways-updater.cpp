@@ -5,10 +5,12 @@
 //  inside an existing X-Ways install. Reads the user's X-Ways license
 //  credentials, downloads the requested version of the main app (Dongle or
 //  BYOD), extracts it to a sibling folder named after the detected version
-//  (e.g. xwf21-7sr3), and optionally pulls Viewer / Tesseract / Excire / a
-//  Conditional Coloring config, copies *.cfg files and HashDB folders from
-//  the current install, and creates a desktop shortcut (with optional admin
-//  elevation flag).
+//  (e.g. xwf21-7sr3), and optionally pulls Viewer / Tesseract / Excire /
+//  AFF4, and one of two Conditional Coloring.cfg sources (tri-state:
+//  checked = SANS FOR500 build by Michael Yasumoto / peacekeeper0 on GitHub;
+//  indeterminate = upstream x-ways.net; unchecked = skip), copies *.cfg files
+//  and HashDB folders from the current install, and creates a desktop
+//  shortcut (with optional admin elevation flag).
 //
 //  Auth scheme: HTTP Basic on every download URL. Realm is
 //  "Latest password from x-ways.net/license.html". Credentials stored next
@@ -50,7 +52,7 @@
 
 // --- Identity ---------------------------------------------------------------
 static const wchar_t* NAME        = L"xways-updater";
-static const wchar_t* VERSION     = L"0.1.2";
+static const wchar_t* VERSION     = L"0.1.3";
 static const wchar_t* DESCRIPTION = L"Download and install X-Ways Forensics (Dongle or BYOD) plus optional resources.";
 
 // Verbose per-file/per-step diagnostics. Off by default for shipped builds —
@@ -75,11 +77,27 @@ static const wchar_t* URL_EXCIRE          = L"https://www.x-ways.net/res/Excire.
 //   AFF4 X-Tension — keep pinned to a known-good version. Bump when a newer
 //   release shows up at https://www.x-ways.net/res/ (manual operation).
 static const wchar_t* URL_AFF4            = L"https://www.x-ways.net/res/aff4-xways-2.1.1.zip";
-//   Conditional Coloring lives behind a directory listing — file name has a
-//   space, so the URL is percent-encoded.
-static const wchar_t* URL_COND_COLORING   = L"https://www.x-ways.net/res/conditional%20coloring/Conditional%20Coloring.cfg";
+//   Conditional Coloring.cfg — two sources, picked by the tri-state checkbox
+//   on the dialog (default state = SANS).
+//     CCC_UPSTREAM = official x-ways.net Conditional Coloring.cfg
+//                    (dongle creds, HTTP Basic; lives behind a directory
+//                    listing — filename has a space, so the URL is
+//                    percent-encoded).
+//     CCC_SANS     = Michael Yasumoto's (peacekeeper0) SANS FOR500 build,
+//                    hosted as a public raw URL on GitHub. No auth.
+static const wchar_t* URL_COND_COLORING_UPSTREAM = L"https://www.x-ways.net/res/conditional%20coloring/Conditional%20Coloring.cfg";
+static const wchar_t* URL_COND_COLORING_SANS     = L"https://raw.githubusercontent.com/peacekeeper0/X-Ways-Forensics/main/Conditional%20Coloring.cfg";
 
-static const wchar_t* USER_AGENT          = L"xways-updater/0.1.2 (X-Tension)";
+static const wchar_t* USER_AGENT          = L"xways-updater/0.1.3 (X-Tension)";
+
+// Tri-state values for the cond coloring checkbox. Map to Win32 BST_* in the
+// dialog code: CCC_NONE = BST_UNCHECKED, CCC_UPSTREAM = BST_INDETERMINATE,
+// CCC_SANS = BST_CHECKED.
+enum CondColoringChoice : int {
+    CCC_NONE     = 0,
+    CCC_UPSTREAM = 1,
+    CCC_SANS     = 2,
+};
 
 // --- XT_Prepare nOpType ----------------------------------------------------
 enum : DWORD {
@@ -338,6 +356,23 @@ static std::wstring SanitizeFolderName(const std::wstring& raw) {
     return s;
 }
 
+// Pick a fresh ".old" backup path for `<base>\<filename>`. Returns
+// <base>\<filename>.old if that doesn't exist yet, else .old2, .old3, ...
+// up to .old99. Returns empty string if all 99 slots are taken.
+// Used when we need to preserve the current install's copy of a file the
+// updater also just downloaded (e.g. SANS FOR500 Conditional Coloring.cfg).
+static std::wstring UniqueOldBackupPath(const std::wstring& base, const std::wstring& filename) {
+    std::wstring first = JoinPath(base, filename + L".old");
+    if (!FileExists(first)) return first;
+    for (int i = 2; i < 100; ++i) {
+        wchar_t suffix[16];
+        swprintf_s(suffix, L".old%d", i);
+        std::wstring candidate = JoinPath(base, filename + suffix);
+        if (!FileExists(candidate)) return candidate;
+    }
+    return L"";
+}
+
 // If <base>\<filename> doesn't exist, return that path as-is. Otherwise
 // insert "-2", "-3", ... before the extension and return the first variant
 // that doesn't exist. Returns empty string if 99 variants all already exist.
@@ -470,11 +505,12 @@ struct Cfg {
     bool         copyXtensions  = true;
     bool         createShortcut = true;
     bool         shortcutAdmin  = true;       // always-on now (no UI toggle)
-    // Default-on: Viewer Component, Conditional Coloring, AFF4 — small,
-    // commonly wanted, low cost. Off by default: Tesseract (~55 MB) and
-    // Excire (~275 MB) — explicit opt-in since they're heavy.
+    // Default-on: Viewer Component, SANS FOR500 Conditional Coloring.cfg,
+    // AFF4 — small, commonly wanted, low cost. Off by default: Tesseract
+    // (~55 MB) and Excire (~275 MB) — explicit opt-in since they're heavy.
+    // dlCondColoring is a CondColoringChoice (tri-state): default = SANS.
     bool         dlViewer       = true;
-    bool         dlCondColoring = true;
+    int          dlCondColoring = CCC_SANS;
     bool         dlAFF4         = true;
     bool         dlTesseract    = false;
     bool         dlExcire       = false;
@@ -1690,6 +1726,7 @@ struct DlgState {
     std::vector<int>        fieldFlashIds;       // edit-control IDs currently flashing
     HICON                   hIconSmall = nullptr;
     HICON                   hIconBig   = nullptr;
+    HWND                    hTip       = nullptr;  // shared tooltip window for all dialog tooltips
     bool                    populating = false;
     bool                    refreshed  = false;  // true after first successful refresh
     // Install worker — set when an install is running inside the dialog.
@@ -1825,6 +1862,82 @@ static void UpdateModeCheckboxLabel(HWND hDlg) {
             : L"Download Dongle app only";
     }
     SetDlgItemTextW(hDlg, IDC_CHK_FULL_INSTALL, label);
+}
+
+// --- Conditional Coloring tri-state mapping --------------------------------
+// Cycle order matches Win32 AUTO3STATE: UNCHECKED -> CHECKED -> INDETERMINATE
+// -> UNCHECKED. We map them so the default "checked" state means SANS (the
+// strongest opt-in), middle state means upstream, and unchecked means skip.
+static int CondColoringChoiceFromBst(LRESULT bst) {
+    if (bst == BST_CHECKED)       return CCC_SANS;
+    if (bst == BST_INDETERMINATE) return CCC_UPSTREAM;
+    return CCC_NONE;
+}
+static LRESULT BstFromCondColoringChoice(int choice) {
+    if (choice == CCC_SANS)     return BST_CHECKED;
+    if (choice == CCC_UPSTREAM) return BST_INDETERMINATE;
+    return BST_UNCHECKED;
+}
+static const wchar_t* CondColoringLabel(int choice) {
+    switch (choice) {
+        case CCC_SANS:     return L"&SANS FOR500 Conditional Coloring.cfg";
+        case CCC_UPSTREAM: return L"&Conditional Coloring.cfg (x-ways.net)";
+        default:           return L"E&xclude Conditional Coloring.cfg";
+    }
+}
+static const wchar_t* CondColoringTooltip(int choice) {
+    switch (choice) {
+        case CCC_SANS:
+            return
+                L"Checked: download Michael Yasumoto's (peacekeeper0) SANS\n"
+                L"FOR500 build of Conditional Coloring.cfg.\n"
+                L"\n"
+                L"Source: https://github.com/peacekeeper0/X-Ways-Forensics\n"
+                L"(public GitHub raw URL — no x-ways.net credentials used)\n"
+                L"\n"
+                L"Saved as 'Conditional Coloring.cfg' (the exact filename\n"
+                L"X-Ways loads at startup).\n"
+                L"\n"
+                L"Click to cycle: Checked (SANS) -> Indeterminate (x-ways.net)\n"
+                L"-> Unchecked (skip).";
+        case CCC_UPSTREAM:
+            return
+                L"Indeterminate: download the official x-ways.net upstream\n"
+                L"Conditional Coloring.cfg using your dongle credentials.\n"
+                L"\n"
+                L"Source: https://www.x-ways.net/res/conditional%20coloring/\n"
+                L"\n"
+                L"Click to cycle: Indeterminate (x-ways.net) -> Unchecked\n"
+                L"(skip) -> Checked (SANS FOR500 build).";
+        default:
+            return
+                L"Unchecked: skip Conditional Coloring.cfg entirely.\n"
+                L"\n"
+                L"If 'Copy custom configs' is on and the current install has\n"
+                L"a Conditional Coloring.cfg, it will be copied forward as\n"
+                L"part of the normal *.cfg copy pass.\n"
+                L"\n"
+                L"Click to cycle: Unchecked (skip) -> Checked (SANS FOR500)\n"
+                L"-> Indeterminate (x-ways.net).";
+    }
+}
+
+// Push the current label + tooltip text for the cond-coloring tri-state
+// checkbox. Called from WM_INITDIALOG (initial paint) and from the
+// BN_CLICKED handler (after the AUTO3STATE cycles its check value).
+static void UpdateCondColoringUi(HWND hDlg, HWND hTip) {
+    LRESULT bst = SendDlgItemMessageW(hDlg, IDC_CHK_DL_COND_COLORING, BM_GETCHECK, 0, 0);
+    int choice = CondColoringChoiceFromBst(bst);
+    SetDlgItemTextW(hDlg, IDC_CHK_DL_COND_COLORING, CondColoringLabel(choice));
+    if (hTip) {
+        TOOLINFOW ti{};
+        ti.cbSize   = sizeof(ti);
+        ti.uFlags   = TTF_IDISHWND;
+        ti.hwnd     = hDlg;
+        ti.uId      = (UINT_PTR)GetDlgItem(hDlg, IDC_CHK_DL_COND_COLORING);
+        ti.lpszText = (LPWSTR)CondColoringTooltip(choice);
+        SendMessageW(hTip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+    }
 }
 
 // Single source of truth for the (mode, radio) → field-enable matrix.
@@ -2164,8 +2277,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
         }
         UpdateFolderExistsWarning(hDlg);
 
-        // Tooltip on the "Copy custom configs" checkbox: explain what we copy
-        // and remind the analyst to review the rest.
+        // Tooltips on dialog controls. Single tooltip window owns multiple
+        // tool entries — one per checkbox we want to annotate. The handle is
+        // stashed in DlgState so dynamic-text tips (e.g. the tri-state
+        // Conditional Coloring checkbox) can update their text on click.
         {
             INITCOMMONCONTROLSEX icc{};
             icc.dwSize = sizeof(icc);
@@ -2176,6 +2291,16 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
                 CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                 hDlg, nullptr, g_hSelf, nullptr);
             if (hTip) {
+                ds->hTip = hTip;
+                auto addTip = [&](int ctlId, const wchar_t* text) {
+                    TOOLINFOW ti{};
+                    ti.cbSize   = sizeof(ti);
+                    ti.uFlags   = TTF_IDISHWND | TTF_SUBCLASS;
+                    ti.hwnd     = hDlg;
+                    ti.uId      = (UINT_PTR)GetDlgItem(hDlg, ctlId);
+                    ti.lpszText = (LPWSTR)text;
+                    SendMessageW(hTip, TTM_ADDTOOL, 0, (LPARAM)&ti);
+                };
                 static const wchar_t* kCopyTip =
                     L"Copies these from the current install root:\n"
                     L"  - *.cfg files (WinHex.cfg, Conditional Coloring.cfg, ...)\n"
@@ -2184,14 +2309,11 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
                     L"  - investigator.ini\n"
                     L"  - Passwords.txt\n"
                     L"  - Programs.txt";
-                TOOLINFOW ti{};
-                ti.cbSize   = sizeof(ti);
-                ti.uFlags   = TTF_IDISHWND | TTF_SUBCLASS;
-                ti.hwnd     = hDlg;
-                ti.uId      = (UINT_PTR)GetDlgItem(hDlg, IDC_CHK_COPY_CFG);
-                ti.lpszText = (LPWSTR)kCopyTip;
-                SendMessageW(hTip, TTM_ADDTOOL, 0, (LPARAM)&ti);
-                SendMessageW(hTip, TTM_SETMAXTIPWIDTH, 0, 360);
+                addTip(IDC_CHK_COPY_CFG, kCopyTip);
+                // Cond-coloring tip text is set dynamically by
+                // UpdateCondColoringUi based on the current tri-state.
+                addTip(IDC_CHK_DL_COND_COLORING, CondColoringTooltip(c.dlCondColoring));
+                SendMessageW(hTip, TTM_SETMAXTIPWIDTH, 0, 420);
             }
         }
 
@@ -2204,7 +2326,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
         SetCheck(hDlg, IDC_CHK_DL_VIEWER,         c.dlViewer);
         SetCheck(hDlg, IDC_CHK_DL_TESSERACT,      c.dlTesseract);
         SetCheck(hDlg, IDC_CHK_DL_EXCIRE,         c.dlExcire);
-        SetCheck(hDlg, IDC_CHK_DL_COND_COLORING,  c.dlCondColoring);
+        // Cond coloring is tri-state, not bool — push BST_* + sync label.
+        SendDlgItemMessageW(hDlg, IDC_CHK_DL_COND_COLORING, BM_SETCHECK,
+                            (WPARAM)BstFromCondColoringChoice(c.dlCondColoring), 0);
+        UpdateCondColoringUi(hDlg, ds->hTip);
         SetCheck(hDlg, IDC_CHK_DL_AFF4,           c.dlAFF4);
         SetCheck(hDlg, IDC_CHK_COPY_CFG,          c.copyCfg);
         SetCheck(hDlg, IDC_CHK_COPY_HASHDB,       c.copyHashDb);
@@ -2337,6 +2462,12 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             UpdateModeCheckboxLabel(hDlg);
             UpdateDialogEnables(hDlg);
             UpdateFolderCueBanner(hDlg);
+            return TRUE;
+        }
+        if (ctlId == IDC_CHK_DL_COND_COLORING && notify == BN_CLICKED) {
+            // AUTO3STATE has already cycled the visual check value by the
+            // time we see BN_CLICKED — just resync the dynamic label + tip.
+            UpdateCondColoringUi(hDlg, ds ? ds->hTip : nullptr);
             return TRUE;
         }
         if ((ctlId == IDC_RADIO_DONGLE || ctlId == IDC_RADIO_BYOD) && notify == BN_CLICKED) {
@@ -2484,7 +2615,9 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             s.cfg.dlViewer       = GetCheck(hDlg, IDC_CHK_DL_VIEWER);
             s.cfg.dlTesseract    = GetCheck(hDlg, IDC_CHK_DL_TESSERACT);
             s.cfg.dlExcire       = GetCheck(hDlg, IDC_CHK_DL_EXCIRE);
-            s.cfg.dlCondColoring = GetCheck(hDlg, IDC_CHK_DL_COND_COLORING);
+            // Cond coloring is tri-state — read BM_GETCHECK (BST_*) and map.
+            s.cfg.dlCondColoring = CondColoringChoiceFromBst(
+                SendDlgItemMessageW(hDlg, IDC_CHK_DL_COND_COLORING, BM_GETCHECK, 0, 0));
             s.cfg.dlAFF4         = GetCheck(hDlg, IDC_CHK_DL_AFF4);
             s.cfg.copyCfg        = GetCheck(hDlg, IDC_CHK_COPY_CFG);
             s.cfg.copyHashDb     = GetCheck(hDlg, IDC_CHK_COPY_HASHDB);
@@ -2928,15 +3061,18 @@ static bool RunExtrasOnly(Settings& s, std::wstring& finalInstallDir, std::wstri
     // disk space and bail early if there's clearly not enough room.
     Log(L"Pre-flight: checking free space against expected download sizes...");
     uint64_t expectedZip = 0;
-    auto addSize = [&](const wchar_t* url) {
-        uint64_t n = HeadContentLength(url, resUser, resPass);
+    // SANS FOR500 color config lives on GitHub raw — public, no auth. Other
+    // resources sit behind HTTP Basic on x-ways.net with the dongle creds.
+    auto addSize = [&](const wchar_t* url, const std::wstring& u, const std::wstring& p) {
+        uint64_t n = HeadContentLength(url, u, p);
         if (n > 0) expectedZip += n;
     };
-    if (s.cfg.dlViewer)       addSize(URL_VIEWER);
-    if (s.cfg.dlTesseract)    addSize(URL_TESSERACT);
-    if (s.cfg.dlExcire)       addSize(URL_EXCIRE);
-    if (s.cfg.dlAFF4)         addSize(URL_AFF4);
-    if (s.cfg.dlCondColoring) addSize(URL_COND_COLORING);
+    if (s.cfg.dlViewer)       addSize(URL_VIEWER,    resUser, resPass);
+    if (s.cfg.dlTesseract)    addSize(URL_TESSERACT, resUser, resPass);
+    if (s.cfg.dlExcire)       addSize(URL_EXCIRE,    resUser, resPass);
+    if (s.cfg.dlAFF4)         addSize(URL_AFF4,      resUser, resPass);
+    if (s.cfg.dlCondColoring == CCC_UPSTREAM) addSize(URL_COND_COLORING_UPSTREAM, resUser, resPass);
+    if (s.cfg.dlCondColoring == CCC_SANS)     addSize(URL_COND_COLORING_SANS,     L"",     L"");
     // Reserve 3x expected zip size: download + extracted (~2x) staging.
     uint64_t reserved = expectedZip * 3;
     uint64_t freeBytes = GetFreeBytes(base);
@@ -2970,7 +3106,7 @@ static bool RunExtrasOnly(Settings& s, std::wstring& finalInstallDir, std::wstri
         Log(L"  *** KEEP_TEMP_DIR=true — temp dir will NOT be cleaned: " + tempDir);
     }
 
-    auto downloadOnly = [&](const wchar_t* url) {
+    auto downloadOnly = [&](const wchar_t* url, const std::wstring& u, const std::wstring& p) {
         std::wstring urls = url;
         size_t slash = urls.find_last_of(L'/');
         std::wstring fname = (slash != std::wstring::npos) ? urls.substr(slash + 1) : urls;
@@ -2985,7 +3121,7 @@ static bool RunExtrasOnly(Settings& s, std::wstring& finalInstallDir, std::wstri
         ProgressSetStatus(fname);
         Log(std::wstring(L"  Downloading ") + fname + L"...");
         std::wstring derr;
-        if (!DownloadUrlWithRetry(url, resUser, resPass, dst, fname, derr)) {
+        if (!DownloadUrlWithRetry(url, u, p, dst, fname, derr)) {
             Log(std::wstring(L"    ") + fname + L" download failed: " + derr);
             return;
         }
@@ -2993,11 +3129,12 @@ static bool RunExtrasOnly(Settings& s, std::wstring& finalInstallDir, std::wstri
         ProgressFileDone(dst);
     };
     Log(L"[2/2] Pulling selected tools (archives kept as-is, not extracted)...");
-    if (s.cfg.dlViewer)       downloadOnly(URL_VIEWER);
-    if (s.cfg.dlTesseract)    downloadOnly(URL_TESSERACT);
-    if (s.cfg.dlExcire)       downloadOnly(URL_EXCIRE);
-    if (s.cfg.dlAFF4)         downloadOnly(URL_AFF4);
-    if (s.cfg.dlCondColoring) downloadOnly(URL_COND_COLORING);
+    if (s.cfg.dlViewer)       downloadOnly(URL_VIEWER,    resUser, resPass);
+    if (s.cfg.dlTesseract)    downloadOnly(URL_TESSERACT, resUser, resPass);
+    if (s.cfg.dlExcire)       downloadOnly(URL_EXCIRE,    resUser, resPass);
+    if (s.cfg.dlAFF4)         downloadOnly(URL_AFF4,      resUser, resPass);
+    if (s.cfg.dlCondColoring == CCC_UPSTREAM) downloadOnly(URL_COND_COLORING_UPSTREAM, resUser, resPass);
+    if (s.cfg.dlCondColoring == CCC_SANS)     downloadOnly(URL_COND_COLORING_SANS,     L"",     L"");
     ProgressPostPercent(g_progress.totalExpected);  // pin to 100%
     return true;
 }
@@ -3035,15 +3172,18 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
         if (n > 0) expectedZip += n;
     }
     if (wantOptionals) {
-        auto addSize = [&](const wchar_t* url) {
-            uint64_t n = HeadContentLength(url, resUser, resPass);
+        // SANS FOR500 color config is on GitHub raw — public, no auth.
+        // Other resources use dongle creds against x-ways.net.
+        auto addSize = [&](const wchar_t* url, const std::wstring& u, const std::wstring& p) {
+            uint64_t n = HeadContentLength(url, u, p);
             if (n > 0) expectedZip += n;
         };
-        if (s.cfg.dlViewer)       addSize(URL_VIEWER);
-        if (s.cfg.dlTesseract)    addSize(URL_TESSERACT);
-        if (s.cfg.dlExcire)       addSize(URL_EXCIRE);
-        if (s.cfg.dlAFF4)         addSize(URL_AFF4);
-        if (s.cfg.dlCondColoring) addSize(URL_COND_COLORING);
+        if (s.cfg.dlViewer)       addSize(URL_VIEWER,    resUser, resPass);
+        if (s.cfg.dlTesseract)    addSize(URL_TESSERACT, resUser, resPass);
+        if (s.cfg.dlExcire)       addSize(URL_EXCIRE,    resUser, resPass);
+        if (s.cfg.dlAFF4)         addSize(URL_AFF4,      resUser, resPass);
+        if (s.cfg.dlCondColoring == CCC_UPSTREAM) addSize(URL_COND_COLORING_UPSTREAM, resUser, resPass);
+        if (s.cfg.dlCondColoring == CCC_SANS)     addSize(URL_COND_COLORING_SANS,     L"",     L"");
     }
     // Reserve 3x expected zip size: zip + extracted (~2x) staging. tar.exe
     // moves rather than re-copies into the final folder, so the doubling
@@ -3388,16 +3528,35 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
         Log(L"  Mode = main app only; skipping optional downloads.");
     }
 
-    // Conditional Coloring.cfg (single file, no extraction). Independent
-    // of copy_cfg — when both are on, this download wins because the .cfg
-    // copy loop below skips Conditional Coloring.cfg.
-    if (wantOptionals && s.cfg.dlCondColoring) {
+    // Conditional Coloring.cfg — single file, no extraction. The tri-state
+    // checkbox picks the source:
+    //   CCC_UPSTREAM = official x-ways.net build, fetched with dongle creds
+    //   CCC_SANS     = Michael Yasumoto's (peacekeeper0) SANS FOR500 build
+    //                  from a public GitHub raw URL (no auth)
+    //   CCC_NONE     = skip entirely; .cfg copy loop will carry the old one
+    //                  forward (if any) under the normal *.cfg pass.
+    // File always lands as "Conditional Coloring.cfg" because that's the
+    // exact name X-Ways loads at startup. Independent of copy_cfg — when
+    // both are on, this download wins because the .cfg copy loop below
+    // skips Conditional Coloring.cfg (and may preserve the old one as
+    // Conditional Coloring.cfg.old if it differs from the download).
+    if (wantOptionals && s.cfg.dlCondColoring != CCC_NONE) {
+        const wchar_t* url = (s.cfg.dlCondColoring == CCC_SANS)
+            ? URL_COND_COLORING_SANS : URL_COND_COLORING_UPSTREAM;
+        std::wstring  ccUser = (s.cfg.dlCondColoring == CCC_SANS) ? std::wstring() : resUser;
+        std::wstring  ccPass = (s.cfg.dlCondColoring == CCC_SANS) ? std::wstring() : resPass;
+        const wchar_t* statusLabel = (s.cfg.dlCondColoring == CCC_SANS)
+            ? L"SANS FOR500 Conditional Coloring.cfg"
+            : L"Conditional Coloring.cfg (x-ways.net)";
+        const wchar_t* logLabel = (s.cfg.dlCondColoring == CCC_SANS)
+            ? L"  Downloading SANS FOR500 Conditional Coloring.cfg (peacekeeper0/X-Ways-Forensics)..."
+            : L"  Downloading Conditional Coloring.cfg (x-ways.net upstream)...";
         std::wstring dst = JoinPath(finalInstallDir, L"Conditional Coloring.cfg");
-        ProgressSetStatus(L"Conditional Coloring.cfg");
-        Log(L"  Downloading Conditional Coloring.cfg...");
+        ProgressSetStatus(statusLabel);
+        Log(logLabel);
         std::wstring derr;
-        if (!DownloadUrlWithRetry(URL_COND_COLORING, resUser, resPass, dst, L"Conditional Coloring.cfg", derr)) {
-            Log(L"    Conditional Coloring download failed: " + derr);
+        if (!DownloadUrlWithRetry(url, ccUser, ccPass, dst, L"Conditional Coloring.cfg", derr)) {
+            Log(std::wstring(L"    Conditional Coloring.cfg download failed: ") + derr);
         } else {
             Log(L"    saved: " + dst);
             ProgressFileDone(dst);
@@ -3440,6 +3599,13 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
         // selections win over upstream defaults; *.dlg files are written
         // by the "save dialog selection" feature, see xways-command-line.md
         // section on Dlg: parameter).
+        //
+        // Exception: Conditional Coloring.cfg when the SANS FOR500 download
+        // option was selected. The downloaded SANS version must win, so we
+        // never overwrite it from the old install. If the old install's copy
+        // hash-matches the downloaded one, do nothing. Otherwise preserve
+        // the old copy as Conditional Coloring.cfg.old (or .old2, .old3, ...)
+        // so the analyst can recover their customizations.
         for (const wchar_t* glob : { L"*.cfg", L"*.dlg" }) {
             WIN32_FIND_DATAW fd{};
             std::wstring pat = JoinPath(curInstall, glob);
@@ -3449,6 +3615,30 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
                 if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
                 std::wstring src = JoinPath(curInstall, fd.cFileName);
                 std::wstring dst = JoinPath(finalInstallDir, fd.cFileName);
+
+                bool isCondColoring = (_wcsicmp(fd.cFileName, L"Conditional Coloring.cfg") == 0);
+                if (isCondColoring && s.cfg.dlCondColoring != CCC_NONE && FileExists(dst)) {
+                    const wchar_t* sourceLabel = (s.cfg.dlCondColoring == CCC_SANS)
+                        ? L"SANS FOR500 download" : L"x-ways.net download";
+                    std::wstring hashOld = Sha256File(src);
+                    std::wstring hashNew = Sha256File(dst);
+                    if (!hashOld.empty() && !hashNew.empty() && hashOld == hashNew) {
+                        Log(std::wstring(L"    Conditional Coloring.cfg: old install matches ") + sourceLabel + L" (sha256 " + hashNew.substr(0, 12) + L"...) — nothing to back up.");
+                    } else {
+                        std::wstring backup = UniqueOldBackupPath(finalInstallDir, L"Conditional Coloring.cfg");
+                        if (backup.empty()) {
+                            Log(std::wstring(L"    Conditional Coloring.cfg: 99 .old backups already present — refusing to overwrite the ") + sourceLabel + L", old copy NOT preserved.");
+                        } else if (CopyFileW(src.c_str(), backup.c_str(), /*failIfExists=*/TRUE)) {
+                            size_t slash = backup.find_last_of(L"\\/");
+                            std::wstring backupName = (slash != std::wstring::npos) ? backup.substr(slash + 1) : backup;
+                            Log(std::wstring(L"    Conditional Coloring.cfg differs from ") + sourceLabel + L" — old copy preserved as " + backupName);
+                        } else {
+                            Log(L"    Conditional Coloring.cfg: failed to save old copy as .old backup (CopyFile error).");
+                        }
+                    }
+                    continue;  // do NOT overwrite the downloaded Conditional Coloring.cfg
+                }
+
                 if (!CopyFileW(src.c_str(), dst.c_str(), /*failIfExists=*/FALSE)) {
                     Log(std::wstring(L"    copy failed: ") + fd.cFileName);
                 } else {
