@@ -16,17 +16,16 @@ X-Ways install as an X-tension.
   **AFF4 X-Tension**, and a **Conditional Coloring.cfg** — tri-state checkbox
   picks the source: checked = SANS FOR500 build by Michael Yasumoto
   ([`peacekeeper0/X-Ways-Forensics`](https://github.com/peacekeeper0/X-Ways-Forensics));
-  indeterminate = upstream `x-ways.net`; unchecked = skip. When **Copy custom
+  mid-check = upstream `x-ways.net` config; unchecked = skip. When **Copy custom
   configs** is on and the current install already has a `Conditional Coloring.cfg`,
   the freshly downloaded one wins — the old copy is preserved as
-  `Conditional Coloring.cfg.old` (or `.old2`, `.old3`, ...) when its SHA-256
-  differs (identical copies are silently skipped).
+  `Conditional Coloring.cfg.old` when its SHA-256 differs.
 - Optionally **copies** `*.cfg`, `*.dlg`, `*.tpl`, `investigator.ini`, and
   `Passwords.txt` from the current install (per-policy: cfg/ini/Passwords
   overwrite; tpl is keep-upstream so user-only templates carry forward).
 - Optionally copies the `HashDB` / `HashDB 2` folders.
 - Optionally copies the current install's `xtensions\` folder forward.
-- Optionally **creates a desktop shortcut** to the new install (with optional
+- Optionally **creates a desktop shortcut** to the new install (with 
   "Run as administrator" flag and matching `AppCompatFlags\Layers RUNASADMIN`
   registry entry on the target exe).
 
@@ -34,15 +33,10 @@ X-Ways install as an X-tension.
 
 - **Windows (x64).** Should work on any 64-bit Windows that runs X-Ways
   (Win 10, Win 11, Windows Server). Only x64 is tested.
-- **X-Ways Forensics** - only tested for 21.0 or newer.
+- **X-Ways Forensics x64** - only tested for 21.0 or newer, x64 only.
 - **A valid X-Ways license** - Dongle or BYOD license.
 
 ## Authentication
-
-Every download uses **HTTP Basic** auth on `x-ways.net` (resources, dongle
-app) and `x-ways.com` (BYOD app). The realm is _"Latest password from
-x-ways.net/license.html"_ — the same username/password X-Ways prompts you for
-in a browser.
 
 - **Dongle creds** — used for the dongle app (`/xwf/`) AND every resource
   (`/res/...`).
@@ -51,9 +45,7 @@ in a browser.
   whenever the BYOD radio is selected.
 
 Credentials can be remembered next to the DLL via DPAPI (per-Windows-user
-ciphertext). Toggle off to avoid persisting. The sidecar file
-(`xways-updater.cfg`) is gitignored by default — even DPAPI ciphertext is
-yours, not something to redistribute.
+ciphertext) in the sidecar file (`xways-updater.cfg`).
 
 ## Install
 
@@ -83,8 +75,8 @@ X-Ways → **Tools → Run X-Tensions...** → select
 ## Disclaimer
 
 This is a community-developed X-Tension. It is **not** affiliated with,
-endorsed by, or supported by X-Ways AG. Use at your own risk in compliance
-with your X-Ways license agreement.
+endorsed by, or supported by X-Ways AG. It's also vide coded, use at your 
+own risk. The code is here to review, so feel free to submit an issue if you find one.
 
 ## License
 
