@@ -109,8 +109,8 @@ X-Ways → **Tools → Run X-Tensions...** → select
 ## Disclaimer
 
 This is a community-developed X-Tension. It is **not** affiliated with,
-endorsed by, or supported by X-Ways AG. It's also vide coded, use at your 
-own risk. The code is here to review, so feel free to submit an issue if you find one.
+endorsed by, or supported by X-Ways AG. It's also vibe coded, use at your 
+own risk. The code is here to review, please submit an issue if you find one.
 
 ## License
 
