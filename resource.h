@@ -9,22 +9,16 @@
 #define IDC_RADIO_DONGLE            111
 #define IDC_RADIO_BYOD              112
 
-// Credentials group
+// Credentials group — single visible row; the group title rewrites to
+// "Dongle credentials" / "BYOD credentials" as the License radio changes,
+// and the field contents swap from the matching saved/in-memory slot.
 #define IDC_GROUP_CREDS             120
-#define IDC_LABEL_DONGLE_HEADER     121
-#define IDC_LABEL_DONGLE_USER       122
-#define IDC_EDIT_DONGLE_USER        123
-#define IDC_LABEL_DONGLE_PASS       124
-#define IDC_EDIT_DONGLE_PASS        125
-#define IDC_BTN_TOGGLE_DONGLE_PASS  126
-#define IDC_BTN_TEST_DONGLE         127
-#define IDC_LABEL_BYOD_HEADER       128
-#define IDC_LABEL_BYOD_USER         129
-#define IDC_EDIT_BYOD_USER          130
-#define IDC_LABEL_BYOD_PASS         131
-#define IDC_EDIT_BYOD_PASS          132
-#define IDC_BTN_TOGGLE_BYOD_PASS    133
-#define IDC_BTN_TEST_BYOD           134
+#define IDC_LABEL_USER              122
+#define IDC_EDIT_USER               123
+#define IDC_LABEL_PASS              124
+#define IDC_EDIT_PASS               125
+#define IDC_BTN_TOGGLE_PASS         126
+#define IDC_BTN_TEST                127
 #define IDC_CHK_REMEMBER_CREDS      135
 
 // Version group
@@ -102,3 +96,4 @@
 // Timer IDs
 #define TIMER_REFRESH_FLASH         2001
 #define TIMER_FIELD_FLASH           2002
+#define TIMER_SHIFT_POLL            2003

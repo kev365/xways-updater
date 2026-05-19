@@ -16,6 +16,14 @@
 //  "Latest password from x-ways.net/license.html". Credentials stored next
 //  to the DLL in xways-updater.cfg, DPAPI-encrypted (per Windows user).
 //
+//  Cred model (v0.1.4+): one visible cred row in the dialog. The License
+//  Type radio picks which slot (dongle vs BYOD) is hydrated into the fields
+//  and which slot OnSave writes back to — the OTHER slot is preserved on
+//  disk so a user with both licenses doesn't lose either set by installing
+//  the other. Either license's creds fetch BOTH its matching main app AND
+//  every extra/resource — there is no longer an asymmetry where extras
+//  forced dongle creds.
+//
 //  Important file-name detail (v0.1):
 //    - Dongle main exe inside xw_forensics.zip:  xwforensics64.exe
 //    - BYOD   main exe inside xwb.zip:           xwb64.exe
@@ -52,7 +60,7 @@
 
 // --- Identity ---------------------------------------------------------------
 static const wchar_t* NAME        = L"xways-updater";
-static const wchar_t* VERSION     = L"0.1.3";
+static const wchar_t* VERSION     = L"0.1.4";
 static const wchar_t* DESCRIPTION = L"Download and install X-Ways Forensics (Dongle or BYOD) plus optional resources.";
 
 // Verbose per-file/per-step diagnostics. Off by default for shipped builds —
@@ -88,7 +96,7 @@ static const wchar_t* URL_AFF4            = L"https://www.x-ways.net/res/aff4-xw
 static const wchar_t* URL_COND_COLORING_UPSTREAM = L"https://www.x-ways.net/res/conditional%20coloring/Conditional%20Coloring.cfg";
 static const wchar_t* URL_COND_COLORING_SANS     = L"https://raw.githubusercontent.com/peacekeeper0/X-Ways-Forensics/main/Conditional%20Coloring.cfg";
 
-static const wchar_t* USER_AGENT          = L"xways-updater/0.1.3 (X-Tension)";
+static const wchar_t* USER_AGENT          = L"xways-updater/0.1.4 (X-Tension)";
 
 // Tri-state values for the cond coloring checkbox. Map to Win32 BST_* in the
 // dialog code: CCC_NONE = BST_UNCHECKED, CCC_UPSTREAM = BST_INDETERMINATE,
@@ -498,7 +506,6 @@ struct Cfg {
     // the optional resources (extras_only). Backed by the tri-state checkbox
     // in the dialog.
     std::wstring mode           = L"full";    // full | extras_only
-    bool         hasByodCreds   = false;
     bool         includeBeta    = false;
     bool         copyCfg        = true;
     bool         copyHashDb     = true;
@@ -551,9 +558,11 @@ static Cfg LoadCfg() {
     return c;
 }
 
-static void SaveCfg(const Cfg& c) {
-    std::ofstream f(CfgPath(), std::ios::trunc);
-    if (!f.is_open()) return;
+// Write the cfg to an explicit path (lets Shift+Cancel save a COPY to a
+// user-picked folder). Returns true on success. Same format as SaveCfg.
+static bool WriteCfgToPath(const std::wstring& path, const Cfg& c) {
+    std::ofstream f(path, std::ios::trunc);
+    if (!f.is_open()) return false;
     f << "# xways-updater sidecar config (credentials only).\n";
     f << "# Passwords are DPAPI-encrypted, scoped to the current Windows user.\n";
     f << "# Every other setting is derived at dialog open and not persisted.\n";
@@ -563,6 +572,19 @@ static void SaveCfg(const Cfg& c) {
     f << "byod_user="       << WideToUtf8(c.byodUser) << "\n";
     if (c.remember && !c.byodPass.empty())
         f << "byod_pass_b64="   << EncryptStringDPAPI(c.byodPass) << "\n";
+    return f.good();
+}
+
+// Returns true on success. Logs the outcome + path to the X-Ways Messages
+// window so a write failure (file locked, read-only, etc.) is diagnosable
+// after the fact. Callers that surface UI feedback (Test, Shift+Install)
+// can branch on the return.
+static bool SaveCfg(const Cfg& c) {
+    std::wstring path = CfgPath();
+    bool ok = WriteCfgToPath(path, c);
+    Log(ok ? (L"SaveCfg: wrote " + path)
+           : (L"SaveCfg: FAILED to write " + path));
+    return ok;
 }
 
 // --- WinHTTP helpers --------------------------------------------------------
@@ -1586,24 +1608,44 @@ static std::wstring GetDesktopPath() {
 }
 
 // --- Browse-for-folder ------------------------------------------------------
+// Modern folder picker (IFileOpenDialog, Vista+). Has a permanently-visible
+// "New folder" toolbar button -- better discoverability than the legacy
+// SHBrowseForFolderW dialog. See docs/xtension-dialog-conventions.md for
+// the canonical skeleton. Returns the picked path or "" on Cancel.
 static std::wstring BrowseForFolder(HWND parent, const std::wstring& title, const std::wstring& start) {
-    BROWSEINFOW bi{};
-    bi.hwndOwner = parent;
-    bi.lpszTitle = title.c_str();
-    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    bi.lpfn      = [](HWND hwnd, UINT uMsg, LPARAM /*lp*/, LPARAM lpData) -> int {
-        if (uMsg == BFFM_INITIALIZED && lpData) {
-            SendMessageW(hwnd, BFFM_SETSELECTIONW, TRUE, lpData);
+    HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    std::wstring picked;
+
+    IFileOpenDialog* dlg = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                                   CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) && dlg) {
+        DWORD opts = 0;
+        dlg->GetOptions(&opts);
+        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        if (!title.empty()) dlg->SetTitle(title.c_str());
+        if (!start.empty()) {
+            IShellItem* psi = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr,
+                                                     IID_PPV_ARGS(&psi))) && psi) {
+                dlg->SetDefaultFolder(psi);
+                psi->Release();
+            }
         }
-        return 0;
-    };
-    bi.lParam    = (LPARAM)start.c_str();
-    LPITEMIDLIST idl = SHBrowseForFolderW(&bi);
-    if (!idl) return L"";
-    wchar_t buf[MAX_PATH] = {0};
-    SHGetPathFromIDListW(idl, buf);
-    CoTaskMemFree(idl);
-    return buf;
+        if (SUCCEEDED(dlg->Show(parent))) {
+            IShellItem* result = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&result)) && result) {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(result->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                    picked = path;
+                    CoTaskMemFree(path);
+                }
+                result->Release();
+            }
+        }
+        dlg->Release();
+    }
+    if (SUCCEEDED(hrInit)) CoUninitialize();
+    return picked;
 }
 
 // --- Dialog-driven settings struct -----------------------------------------
@@ -1618,32 +1660,55 @@ struct Settings {
     bool           okPressed    = false;
 };
 
+// --- Single-cred-row helpers (v0.1.4) --------------------------------------
+// The dialog shows ONE Username + Password pair. Settings.cfg keeps both
+// slots (dongle + byod) — the radio decides which slot is reflected in the
+// fields. The helpers below ferry text between fields and slots and rewrite
+// the group title so users can see at a glance which slot they're editing.
+static void UpdateCredsGroupTitle(HWND hDlg, bool isByod) {
+    SetDlgItemTextW(hDlg, IDC_GROUP_CREDS,
+                    isByod ? L"BYOD credentials" : L"Dongle credentials");
+}
+// Read the visible edit fields into the cfg slot for `slotIsByod`.
+// Called BEFORE swapping the radio so whatever the user typed in the old
+// slot is preserved before we overwrite the fields with the new slot's
+// contents. Also called on Install so OnSave sees the latest edits.
+static void CaptureCredEditsTo(HWND hDlg, Cfg& cfg, bool slotIsByod) {
+    std::wstring u, p;
+    {
+        int len = GetWindowTextLengthW(GetDlgItem(hDlg, IDC_EDIT_USER));
+        u.assign(len + 1, L'\0');
+        GetDlgItemTextW(hDlg, IDC_EDIT_USER, u.data(), len + 1);
+        u.resize(wcsnlen(u.c_str(), len + 1));
+    }
+    {
+        int len = GetWindowTextLengthW(GetDlgItem(hDlg, IDC_EDIT_PASS));
+        p.assign(len + 1, L'\0');
+        GetDlgItemTextW(hDlg, IDC_EDIT_PASS, p.data(), len + 1);
+        p.resize(wcsnlen(p.c_str(), len + 1));
+    }
+    if (slotIsByod) { cfg.byodUser = u; cfg.byodPass = p; }
+    else            { cfg.dongleUser = u; cfg.donglePass = p; }
+}
+// Push the slot's stored creds into the edit fields. Empty slots blank the
+// row out. Caller is responsible for re-masking the password field if the
+// user had toggled Show on the old row (we leave the existing mask state).
+static void LoadCredEditsFrom(HWND hDlg, const Cfg& cfg, bool slotIsByod) {
+    const std::wstring& u = slotIsByod ? cfg.byodUser   : cfg.dongleUser;
+    const std::wstring& p = slotIsByod ? cfg.byodPass   : cfg.donglePass;
+    SetDlgItemTextW(hDlg, IDC_EDIT_USER, u.c_str());
+    SetDlgItemTextW(hDlg, IDC_EDIT_PASS, p.c_str());
+}
+
 // Forwards
 static bool DownloadAppZip(const Settings& s, const std::wstring& zipOut, std::wstring& err);
 static std::vector<IndexEntry> RefreshVersions(bool isByod, const std::wstring& user, const std::wstring& pass, std::wstring& err);
 static void ShowAboutDialog(HWND parent);
 
 // --- Dialog proc ------------------------------------------------------------
-static void EnableDongleCredFields(HWND h, bool on) {
-    // Includes the section header — when dongle creds aren't needed at all
-    // (MainOnly + BYOD radio), the entire row should look greyed.
-    EnableWindow(GetDlgItem(h, IDC_LABEL_DONGLE_HEADER), on);
-    EnableWindow(GetDlgItem(h, IDC_LABEL_DONGLE_USER), on);
-    EnableWindow(GetDlgItem(h, IDC_EDIT_DONGLE_USER),  on);
-    EnableWindow(GetDlgItem(h, IDC_LABEL_DONGLE_PASS), on);
-    EnableWindow(GetDlgItem(h, IDC_EDIT_DONGLE_PASS),  on);
-    EnableWindow(GetDlgItem(h, IDC_BTN_TOGGLE_DONGLE_PASS), on);
-    EnableWindow(GetDlgItem(h, IDC_BTN_TEST_DONGLE),   on);
-}
-
-static void EnableBYODCredFields(HWND h, bool on) {
-    EnableWindow(GetDlgItem(h, IDC_LABEL_BYOD_USER), on);
-    EnableWindow(GetDlgItem(h, IDC_EDIT_BYOD_USER),  on);
-    EnableWindow(GetDlgItem(h, IDC_LABEL_BYOD_PASS), on);
-    EnableWindow(GetDlgItem(h, IDC_EDIT_BYOD_PASS),  on);
-    EnableWindow(GetDlgItem(h, IDC_BTN_TOGGLE_BYOD_PASS), on);
-    EnableWindow(GetDlgItem(h, IDC_BTN_TEST_BYOD),   on);
-}
+// (v0.1.3 had EnableDongleCredFields / EnableBYODCredFields — both deleted
+// in v0.1.4 since there is only one credentials row now. The row is always
+// enabled; the License Type radio swaps which slot it represents.)
 
 // Toggle ES_PASSWORD masking on a password edit field. Updates the toggle
 // button text to "Show" / "Hide" so the current state is visible.
@@ -1679,9 +1744,10 @@ static void SetText(HWND h, int id, const std::wstring& s) {
     SetDlgItemTextW(h, id, s.c_str());
 }
 
-// Apply +bold+11pt to group titles for visual emphasis. The credential sub-
-// headers (Dongle / BYOD section labels) get the same bold face — since they
-// act like nested group titles for the indented username/password rows.
+// Apply +bold+11pt to group titles for visual emphasis. In v0.1.3 there were
+// also bold sub-headers ("Dongle credentials..." / "BYOD credentials...") —
+// gone in v0.1.4 since there's a single cred row and the group title carries
+// the active license name.
 static void StyleGroupTitles(HWND hDlg) {
     static const int kBoldGroups[] = {
         IDC_GROUP_LICENSE, IDC_GROUP_CREDS, IDC_GROUP_VERSION,
@@ -1689,7 +1755,8 @@ static void StyleGroupTitles(HWND hDlg) {
         IDC_GROUP_SHORTCUT
     };
     static const int kBoldHeaders[] = {
-        IDC_LABEL_DONGLE_HEADER, IDC_LABEL_BYOD_HEADER
+        // (empty) — kept as a no-op array for the apply loop below.
+        0
     };
     HFONT hf = (HFONT)SendMessageW(hDlg, WM_GETFONT, 0, 0);
     if (!hf) return;
@@ -1735,6 +1802,11 @@ struct DlgState {
     bool                    workerOk     = false;
     std::wstring            workerErr;
     std::wstring            workerFinalDir;
+    // Shift-mode UX state. Set by the TIMER_SHIFT_POLL handler when Shift
+    // is held and the dialog has focus; read by WM_DRAWITEM for the
+    // owner-draw color flip.
+    bool                    shiftInstallLabelOn = false;  // Install -> "Save cfg"
+    bool                    shiftCancelLabelOn  = false;  // Cancel  -> "Save copy to..." (only when !workerActive)
 };
 
 // Lazily-created yellow brush used to highlight cred-field flashes via
@@ -1755,6 +1827,44 @@ static void StartFieldFlash(HWND hDlg, DlgState* ds, std::vector<int> ids) {
     SetTimer(hDlg, TIMER_FIELD_FLASH, 200, nullptr);
     HWND hFirst = GetDlgItem(hDlg, ds->fieldFlashIds.front());
     if (hFirst) SetFocus(hFirst);
+}
+
+// Pre-flight: confirm the cred row has both username and password before
+// firing any HTTP call. Shows the same "Credentials needed" prompt + field
+// flash as the Refresh handler does, so Test / Install / Refresh all share
+// one consistent empty-creds UX. Returns true if both fields are non-empty
+// (caller should proceed); false if missing (caller should return TRUE to
+// swallow the click and let the user fix the row first).
+//
+// `actionPhrase` is the verb-phrase that completes "Please enter ... before
+// <actionPhrase>." — e.g. L"testing", L"installing", L"refreshing the
+// version list".
+static bool EnsureCredsPresent(HWND hDlg, DlgState* ds, bool isByod,
+                               const wchar_t* actionPhrase)
+{
+    std::wstring u, p;
+    {
+        wchar_t buf[256] = {0};
+        GetDlgItemTextW(hDlg, IDC_EDIT_USER, buf, _countof(buf));
+        u = buf;
+        GetDlgItemTextW(hDlg, IDC_EDIT_PASS, buf, _countof(buf));
+        p = buf;
+    }
+    if (!u.empty() && !p.empty()) return true;
+
+    std::wstring msg = L"Please enter your ";
+    msg += isByod ? L"BYOD" : L"dongle";
+    msg += L" username and password before ";
+    msg += actionPhrase;
+    msg += L".";
+    MessageBoxW(hDlg, msg.c_str(), L"Credentials needed",
+                MB_OK | MB_ICONINFORMATION);
+
+    std::vector<int> toFlash;
+    if (u.empty()) toFlash.push_back(IDC_EDIT_USER);
+    if (p.empty()) toFlash.push_back(IDC_EDIT_PASS);
+    StartFieldFlash(hDlg, ds, std::move(toFlash));
+    return false;
 }
 
 // Tri-state mode of the "Full install" checkbox at the top of the dialog.
@@ -1958,26 +2068,17 @@ static void UpdateCondColoringUi(HWND hDlg, HWND hTip) {
 // user does want that.
 static void UpdateDialogEnables(HWND hDlg) {
     InstallMode m = GetInstallMode(hDlg);
-    bool isByod   = GetCheck(hDlg, IDC_RADIO_BYOD);
-    bool needMainApp   = (m != InstallMode::ExtrasOnly);
     bool wantOptionals = (m != InstallMode::MainOnly);
 
-    bool dongleCredsNeeded = !(m == InstallMode::MainOnly && isByod);
-    bool byodCredsNeeded   = needMainApp && isByod;
     // Copy + shortcut only meaningful in Full mode (we're putting a complete
     // install at the destination). Both extras-only and main-only skip the
     // copy stage and the desktop shortcut.
     bool copyShortcutOK    = (m == InstallMode::Full);
 
-    // BYOD radio only meaningful when we're actually fetching the main app.
-    EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BYOD), needMainApp);
-    if (!needMainApp) {
-        SetCheck(hDlg, IDC_RADIO_DONGLE, true);
-        SetCheck(hDlg, IDC_RADIO_BYOD,   false);
-    }
-
-    EnableDongleCredFields(hDlg, dongleCredsNeeded);
-    EnableBYODCredFields  (hDlg, byodCredsNeeded);
+    // v0.1.4: license radio stays enabled in every mode. It now just picks
+    // which saved cred set is active (and which main-app URL, when one is
+    // being fetched). The single cred row is always enabled — the radio
+    // decides which slot it represents.
 
     for (int id : { IDC_CHK_COPY_CFG, IDC_CHK_COPY_HASHDB, IDC_CHK_COPY_XTENSIONS,
                     IDC_CHK_CREATE_SHORTCUT }) {
@@ -2060,8 +2161,7 @@ static unsigned __stdcall DlgWorkerThread(void* p) {
 // per-mode UpdateDialogEnables matrix.
 static const int kAllInputCtlIds[] = {
     IDC_RADIO_DONGLE, IDC_RADIO_BYOD, IDC_CHK_FULL_INSTALL,
-    IDC_EDIT_DONGLE_USER, IDC_EDIT_DONGLE_PASS, IDC_BTN_TOGGLE_DONGLE_PASS, IDC_BTN_TEST_DONGLE,
-    IDC_EDIT_BYOD_USER,   IDC_EDIT_BYOD_PASS,   IDC_BTN_TOGGLE_BYOD_PASS,   IDC_BTN_TEST_BYOD,
+    IDC_EDIT_USER, IDC_EDIT_PASS, IDC_BTN_TOGGLE_PASS, IDC_BTN_TEST,
     IDC_CHK_REMEMBER_CREDS,
     IDC_COMBO_VERSION, IDC_BTN_REFRESH_VERSIONS, IDC_CHK_INCLUDE_BETA,
     IDC_EDIT_INSTALL_BASE, IDC_BTN_BROWSE_INSTALL_BASE, IDC_EDIT_FOLDER_NAME,
@@ -2222,11 +2322,11 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
         SendDlgItemMessageW(hDlg, IDC_CHK_FULL_INSTALL, BM_SETCHECK, modeState, 0);
         UpdateModeCheckboxLabel(hDlg);
 
-        // Credentials
-        SetText(hDlg, IDC_EDIT_DONGLE_USER, c.dongleUser);
-        SetText(hDlg, IDC_EDIT_DONGLE_PASS, c.donglePass);
-        SetText(hDlg, IDC_EDIT_BYOD_USER, c.byodUser);
-        SetText(hDlg, IDC_EDIT_BYOD_PASS, c.byodPass);
+        // Credentials — single row, hydrated from the slot matching the
+        // currently-active radio. The OTHER slot stays in s->cfg untouched
+        // and is restored on radio swap.
+        LoadCredEditsFrom(hDlg, c, defaultByod);
+        UpdateCredsGroupTitle(hDlg, defaultByod);
         SetCheck(hDlg, IDC_CHK_REMEMBER_CREDS, c.remember);
 
         // Version
@@ -2345,10 +2445,25 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
 
         // Refresh-button flash trigger lives on CBN_DROPDOWN now (only fires
         // before the first successful refresh). See WM_COMMAND below.
+
+        // Shift-mode UX (per docs/xtension-dialog-conventions.md):
+        //   Hold Shift -> Install button label flips to "Save cfg" (blue);
+        //                 Cancel button label flips to "Save copy to..." (blue)
+        //                 only while the install worker is NOT running.
+        //   100 ms WM_TIMER polls GetAsyncKeyState(VK_SHIFT) and updates
+        //   labels on transitions. The owner-draw paint hooks into the
+        //   existing s_shiftLabelOn / s_cancelLabelOn statics in WM_TIMER.
+        for (int id : { IDC_BTN_INSTALL, (int)IDCANCEL }) {
+            HWND h = GetDlgItem(hDlg, id);
+            if (h) SetWindowLongPtrW(h, GWL_STYLE,
+                                     GetWindowLongPtrW(h, GWL_STYLE) | BS_OWNERDRAW);
+        }
+        SetTimer(hDlg, TIMER_SHIFT_POLL, 100, nullptr);
         return TRUE;
     }
 
     case WM_DESTROY: {
+        KillTimer(hDlg, TIMER_SHIFT_POLL);
         if (ds && ds->hIconSmall) { DestroyIcon(ds->hIconSmall); ds->hIconSmall = nullptr; }
         if (ds && ds->hIconBig)   { DestroyIcon(ds->hIconBig);   ds->hIconBig   = nullptr; }
         break;
@@ -2414,15 +2529,98 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
                 ds->fieldFlashPhase = 0;
                 ds->fieldFlashIds.clear();
                 // Final repaint to clear the highlight.
-                for (int id : { IDC_EDIT_DONGLE_USER, IDC_EDIT_DONGLE_PASS,
-                                IDC_EDIT_BYOD_USER,   IDC_EDIT_BYOD_PASS }) {
+                for (int id : { IDC_EDIT_USER, IDC_EDIT_PASS }) {
                     HWND h = GetDlgItem(hDlg, id);
                     if (h) InvalidateRect(h, nullptr, TRUE);
                 }
             }
             return TRUE;
         }
+        if (wp == TIMER_SHIFT_POLL && ds) {
+            // Shift-mode UX. While our dialog has focus AND Shift is held:
+            //   Install button -> "Save cfg" (blue, white text)
+            //   Cancel button  -> "Save copy to..." (only when worker idle)
+            // Click handlers re-read GetAsyncKeyState at click time as the
+            // source of truth -- this timer just drives the visual flip.
+            HWND hFocus = GetFocus();
+            HWND hRoot  = hFocus ? GetAncestor(hFocus, GA_ROOT) : nullptr;
+            bool inFocus = (hRoot == hDlg);
+            bool shiftDown = inFocus && ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+
+            if (shiftDown != ds->shiftInstallLabelOn) {
+                ds->shiftInstallLabelOn = shiftDown;
+                // Restore the mode-driven label when Shift releases. The
+                // mode label is one of "&Install" / "&Download" / "&Save tools"
+                // depending on InstallMode; UpdateDialogEnables knows.
+                if (shiftDown) {
+                    SetDlgItemTextW(hDlg, IDC_BTN_INSTALL, L"&Save cfg");
+                } else {
+                    UpdateDialogEnables(hDlg);
+                }
+                InvalidateRect(GetDlgItem(hDlg, IDC_BTN_INSTALL), nullptr, TRUE);
+            }
+
+            bool cancelSaveMode = shiftDown && !ds->workerActive;
+            if (cancelSaveMode != ds->shiftCancelLabelOn) {
+                ds->shiftCancelLabelOn = cancelSaveMode;
+                SetDlgItemTextW(hDlg, IDCANCEL,
+                                cancelSaveMode ? L"Save copy to..." : L"Cancel");
+                InvalidateRect(GetDlgItem(hDlg, IDCANCEL), nullptr, TRUE);
+            }
+            return TRUE;
+        }
         break;
+    }
+
+    case WM_DRAWITEM: {
+        // Owner-draw the Install + Cancel buttons. In default state we
+        // paint a standard themed look (so they match the other buttons).
+        // In Shift mode the active button paints in the Win11 accent blue
+        // with white text -- visual cue that clicking does the alternate
+        // (Save cfg / Save copy to) instead of the default action.
+        DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lp;
+        const bool isInstallBtn = (dis->CtlID == IDC_BTN_INSTALL);
+        const bool isCancelBtn  = (dis->CtlID == IDCANCEL);
+        if (!isInstallBtn && !isCancelBtn) break;
+        if (!ds) break;
+
+        bool altMode = (isInstallBtn && ds->shiftInstallLabelOn) ||
+                       (isCancelBtn  && ds->shiftCancelLabelOn);
+        const bool isPressed = (dis->itemState & ODS_SELECTED) != 0;
+        const bool isFocus   = (dis->itemState & ODS_FOCUS)    != 0;
+        const bool isDisabled= (dis->itemState & ODS_DISABLED) != 0;
+
+        COLORREF bg = altMode ? (isPressed ? RGB(0, 90, 168) : RGB(0, 120, 215))
+                              : GetSysColor(COLOR_BTNFACE);
+        COLORREF fg = altMode ? RGB(255, 255, 255)
+                              : (isDisabled ? GetSysColor(COLOR_GRAYTEXT)
+                                            : GetSysColor(COLOR_BTNTEXT));
+
+        HBRUSH hbr = CreateSolidBrush(bg);
+        FillRect(dis->hDC, &dis->rcItem, hbr);
+        DeleteObject(hbr);
+
+        HBRUSH frameBr = CreateSolidBrush(altMode ? RGB(0, 70, 140)
+                                                  : GetSysColor(COLOR_3DSHADOW));
+        FrameRect(dis->hDC, &dis->rcItem, frameBr);
+        DeleteObject(frameBr);
+
+        if (isFocus) {
+            RECT focus = dis->rcItem;
+            InflateRect(&focus, -3, -3);
+            DrawFocusRect(dis->hDC, &focus);
+        }
+
+        wchar_t txt[64] = {0};
+        GetWindowTextW(dis->hwndItem, txt, _countof(txt));
+        HFONT hFont = (HFONT)SendMessageW(dis->hwndItem, WM_GETFONT, 0, 0);
+        HFONT old = hFont ? (HFONT)SelectObject(dis->hDC, hFont) : nullptr;
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, fg);
+        DrawTextW(dis->hDC, txt, -1, &dis->rcItem,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (old) SelectObject(dis->hDC, old);
+        return TRUE;
     }
 
     case WM_COMMAND: {
@@ -2471,6 +2669,16 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             return TRUE;
         }
         if ((ctlId == IDC_RADIO_DONGLE || ctlId == IDC_RADIO_BYOD) && notify == BN_CLICKED) {
+            bool nowByod = (ctlId == IDC_RADIO_BYOD);
+            // Auto-load the saved creds for the newly-selected license, or
+            // clear the row when nothing is saved for it. We do NOT capture
+            // the outgoing row into s.cfg here — that capture only happens
+            // via Install / Shift+Install (and previously caused typed
+            // scratch to silently overwrite the OTHER slot). Net effect:
+            // typed-but-not-saved input is lost on swap, which the user has
+            // accepted as the right trade for predictable persistence.
+            LoadCredEditsFrom(hDlg, ds->s->cfg, nowByod);
+            UpdateCredsGroupTitle(hDlg, nowByod);
             // Mode label depends on the active radio in the unchecked state.
             UpdateModeCheckboxLabel(hDlg);
             UpdateDialogEnables(hDlg);
@@ -2482,7 +2690,6 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             // swap when the field currently holds the OTHER license's default
             // — any custom path the user typed is preserved untouched.
             {
-                bool nowByod = (ctlId == IDC_RADIO_BYOD);
                 std::wstring cur = GetText(hDlg, IDC_EDIT_INSTALL_BASE);
                 std::wstring otherDefault = GetDefaultInstallBase(!nowByod);
                 if (_wcsicmp(cur.c_str(), otherDefault.c_str()) == 0) {
@@ -2492,12 +2699,8 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             }
             return TRUE;
         }
-        if (ctlId == IDC_BTN_TOGGLE_DONGLE_PASS && notify == BN_CLICKED) {
-            TogglePasswordVisibility(hDlg, IDC_EDIT_DONGLE_PASS, IDC_BTN_TOGGLE_DONGLE_PASS);
-            return TRUE;
-        }
-        if (ctlId == IDC_BTN_TOGGLE_BYOD_PASS && notify == BN_CLICKED) {
-            TogglePasswordVisibility(hDlg, IDC_EDIT_BYOD_PASS, IDC_BTN_TOGGLE_BYOD_PASS);
+        if (ctlId == IDC_BTN_TOGGLE_PASS && notify == BN_CLICKED) {
+            TogglePasswordVisibility(hDlg, IDC_EDIT_PASS, IDC_BTN_TOGGLE_PASS);
             return TRUE;
         }
         if (ctlId == IDC_CHK_INCLUDE_BETA && notify == BN_CLICKED) {
@@ -2519,59 +2722,56 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             UpdateFolderExistsWarning(hDlg);
             return TRUE;
         }
-        if (ctlId == IDC_BTN_TEST_DONGLE) {
-            std::wstring u = GetText(hDlg, IDC_EDIT_DONGLE_USER);
-            std::wstring p = GetText(hDlg, IDC_EDIT_DONGLE_PASS);
-            HttpResult r = HttpRequest(HOST_DONGLE, PATH_DONGLE_CURRENT, u, p, /*head=*/true);
-            std::wstring msg = (r.statusCode == 200)
-                ? L"OK — dongle credentials accepted."
-                : FormatHttpError(r, HOST_DONGLE);
-            MessageBoxW(hDlg, msg.c_str(), L"Test dongle credentials",
-                        MB_OK | (r.statusCode == 200 ? MB_ICONINFORMATION : MB_ICONWARNING));
-            return TRUE;
-        }
-        if (ctlId == IDC_BTN_TEST_BYOD) {
-            std::wstring u = GetText(hDlg, IDC_EDIT_BYOD_USER);
-            std::wstring p = GetText(hDlg, IDC_EDIT_BYOD_PASS);
-            HttpResult r = HttpRequest(HOST_BYOD, PATH_BYOD_CURRENT, u, p, /*head=*/true);
-            std::wstring msg = (r.statusCode == 200)
-                ? L"OK — BYOD credentials accepted."
-                : FormatHttpError(r, HOST_BYOD);
-            MessageBoxW(hDlg, msg.c_str(), L"Test BYOD credentials",
-                        MB_OK | (r.statusCode == 200 ? MB_ICONINFORMATION : MB_ICONWARNING));
+        if (ctlId == IDC_BTN_TEST) {
+            bool isByod = GetCheck(hDlg, IDC_RADIO_BYOD);
+            if (!EnsureCredsPresent(hDlg, ds, isByod, L"testing")) {
+                return TRUE;
+            }
+            std::wstring host = isByod ? HOST_BYOD : HOST_DONGLE;
+            std::wstring path = isByod ? PATH_BYOD_CURRENT : PATH_DONGLE_CURRENT;
+            std::wstring u = GetText(hDlg, IDC_EDIT_USER);
+            std::wstring p = GetText(hDlg, IDC_EDIT_PASS);
+            HttpResult r = HttpRequest(host, path, u, p, /*head=*/true);
+            bool ok = (r.statusCode == 200);
+            std::wstring msg = ok
+                ? (isByod ? std::wstring(L"OK — BYOD credentials accepted.")
+                          : std::wstring(L"OK — dongle credentials accepted."))
+                : FormatHttpError(r, host);
+            // If Test passes AND "Remember credentials" is checked, treat
+            // that as the user's intent to persist these now-validated creds
+            // immediately. We capture the visible row into s.cfg.<active>
+            // and write the cfg sidecar. If Remember is unchecked, nothing
+            // touches disk — Test stays purely diagnostic.
+            if (ok && GetCheck(hDlg, IDC_CHK_REMEMBER_CREDS)) {
+                ds->s->cfg.remember = true;
+                CaptureCredEditsTo(hDlg, ds->s->cfg, isByod);
+                bool saved = SaveCfg(ds->s->cfg);
+                msg += saved
+                    ? L"\n\nSaved to xways-updater.cfg."
+                    : L"\n\nWARNING: failed to write xways-updater.cfg (see Messages window for the path).";
+            }
+            MessageBoxW(hDlg, msg.c_str(),
+                        isByod ? L"Test BYOD credentials" : L"Test dongle credentials",
+                        MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
             return TRUE;
         }
         if (ctlId == IDC_BTN_REFRESH_VERSIONS) {
             bool isByod = GetCheck(hDlg, IDC_RADIO_BYOD);
-            int userId = isByod ? IDC_EDIT_BYOD_USER : IDC_EDIT_DONGLE_USER;
-            int passId = isByod ? IDC_EDIT_BYOD_PASS : IDC_EDIT_DONGLE_PASS;
-            std::wstring u = GetText(hDlg, userId);
-            std::wstring p = GetText(hDlg, passId);
-
-            // Pre-flight: don't try to connect when there's nothing to send.
-            if (u.empty() || p.empty()) {
-                std::vector<int> toFlash;
-                if (u.empty()) toFlash.push_back(userId);
-                if (p.empty()) toFlash.push_back(passId);
-                MessageBoxW(hDlg,
-                    isByod
-                      ? L"Please enter your BYOD username and password before refreshing the version list."
-                      : L"Please enter your dongle username and password before refreshing the version list.",
-                    L"Credentials needed", MB_OK | MB_ICONINFORMATION);
-                StartFieldFlash(hDlg, ds, std::move(toFlash));
+            if (!EnsureCredsPresent(hDlg, ds, isByod, L"refreshing the version list")) {
                 return TRUE;
             }
-
+            std::wstring u = GetText(hDlg, IDC_EDIT_USER);
+            std::wstring p = GetText(hDlg, IDC_EDIT_PASS);
             std::wstring err;
             HCURSOR oldCur = SetCursor(LoadCursor(nullptr, IDC_WAIT));
             ds->versions = RefreshVersions(isByod, u, p, err);
             SetCursor(oldCur);
             if (!err.empty()) {
                 MessageBoxW(hDlg, err.c_str(), L"Refresh versions", MB_OK | MB_ICONWARNING);
-                // If creds were rejected, flash the active set so the user
+                // If creds were rejected, flash the active row so the user
                 // sees where to fix it.
                 if (err.find(L"Invalid credentials") != std::wstring::npos) {
-                    StartFieldFlash(hDlg, ds, { userId, passId });
+                    StartFieldFlash(hDlg, ds, { IDC_EDIT_USER, IDC_EDIT_PASS });
                 }
             } else {
                 ds->refreshed = true;
@@ -2590,12 +2790,11 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             bool wantOptionals = (m != InstallMode::MainOnly);
             s.pickedDongle = GetCheck(hDlg, IDC_RADIO_DONGLE);
             s.cfg.licenseType = s.pickedDongle ? L"dongle" : L"byod";
-            s.cfg.dongleUser = GetText(hDlg, IDC_EDIT_DONGLE_USER);
-            s.cfg.donglePass = GetText(hDlg, IDC_EDIT_DONGLE_PASS);
-            s.cfg.byodUser   = GetText(hDlg, IDC_EDIT_BYOD_USER);
-            s.cfg.byodPass   = GetText(hDlg, IDC_EDIT_BYOD_PASS);
-            // Derived: BYOD creds present means we can save them.
-            s.cfg.hasByodCreds   = !s.cfg.byodUser.empty() && !s.cfg.byodPass.empty();
+            // Capture the visible cred row into the active slot only. The
+            // other slot retains whatever was loaded from .cfg + any edits
+            // the user made before swapping the radio (CaptureCredEditsTo
+            // already wrote those back when the swap happened).
+            CaptureCredEditsTo(hDlg, s.cfg, /*slotIsByod=*/!s.pickedDongle);
             s.cfg.installBase    = GetText(hDlg, IDC_EDIT_INSTALL_BASE);
             // Folder name is user-controlled and feeds JoinPath() and the
             // tar.exe command line. Sanitize: only allow filename-safe chars
@@ -2659,22 +2858,27 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
                 s.cfg.copyCfg = false;
             }
 
-            // Sanity checks. Cred requirements follow the (mode, radio) matrix
-            // in UpdateDialogEnables — only require what we'll actually send.
-            bool dongleCredsNeeded = !(m == InstallMode::MainOnly && !s.pickedDongle);
-            bool byodCredsNeeded   = needMainApp && !s.pickedDongle;
-            if (dongleCredsNeeded && (s.cfg.dongleUser.empty() || s.cfg.donglePass.empty())) {
-                MessageBoxW(hDlg,
-                    L"Dongle credentials are required (used for resources, and for the dongle app).",
-                    L"Missing credentials", MB_OK | MB_ICONWARNING);
+            // Shift+Install = "Save cfg without installing". Skip the
+            // install-time validations (creds, base dir existence, etc.)
+            // -- the analyst is just persisting current dialog state to
+            // xways-updater.cfg for later, possibly partial. Per
+            // docs/xtension-dialog-conventions.md Shift-to-save pattern.
+            bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (shiftHeld) {
+                SaveCfg(s.cfg);
+                SetDlgItemTextW(hDlg, IDC_LABEL_PROGRESS_STATUS,
+                                L"Settings saved to cfg. (Shift+Install: install NOT started.)");
                 return TRUE;
             }
-            if (byodCredsNeeded && (s.cfg.byodUser.empty() || s.cfg.byodPass.empty())) {
-                MessageBoxW(hDlg,
-                    L"BYOD radio is selected but the BYOD username/password are empty.",
-                    L"Missing BYOD credentials", MB_OK | MB_ICONWARNING);
+
+            // Sanity check. Only the active license's creds are needed —
+            // they drive both the main app (if applicable) and every extra.
+            // Shares the "Credentials needed" UX with Refresh + Test for
+            // consistency (same prompt title + field-flash treatment).
+            if (!EnsureCredsPresent(hDlg, ds, !s.pickedDongle, L"installing")) {
                 return TRUE;
             }
+            (void)needMainApp;  // no longer used by cred-validation
             if (s.cfg.installBase.empty()) {
                 MessageBoxW(hDlg, L"Install base directory is not set.",
                             L"Bad install base", MB_OK | MB_ICONWARNING);
@@ -2737,6 +2941,51 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             return TRUE;
         }
         if (ctlId == IDCANCEL) {
+            // Shift+Cancel = "Save copy to..." -- only when no worker is
+            // running. Reads dialog state, prompts the user for a target
+            // folder, writes the cfg with an auto-numbered filename if
+            // collision (xways-updater.cfg, xways-updater-2.cfg, ...).
+            // Does NOT close the dialog. Per the cross-X-Tension shift-mode
+            // pattern (docs/xtension-dialog-conventions.md).
+            bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (shiftHeld && !ds->workerActive) {
+                Settings& s = *ds->s;
+                // The Install handler reads the full dialog state into
+                // s.cfg; reuse that path here so the saved copy reflects
+                // the latest edits. (We re-post a synthetic notification
+                // to ourselves to invoke the same read+collect code.)
+                // For simplicity, just collect the must-have fields here.
+                s.cfg.installBase = GetText(hDlg, IDC_EDIT_INSTALL_BASE);
+                // Pull the visible cred row into the active slot only; the
+                // inactive slot retains whatever was last loaded/captured.
+                bool pickedDongle = GetCheck(hDlg, IDC_RADIO_DONGLE);
+                CaptureCredEditsTo(hDlg, s.cfg, /*slotIsByod=*/!pickedDongle);
+                std::wstring folder = BrowseForFolder(hDlg,
+                    L"Save a copy of xways-updater.cfg to...", L"");
+                if (!folder.empty()) {
+                    const std::wstring base = L"xways-updater";
+                    const std::wstring ext  = L".cfg";
+                    std::wstring target = folder + L"\\" + base + ext;
+                    int n = 1;
+                    while (FileExists(target)) {
+                        ++n;
+                        target = folder + L"\\" + base + L"-" +
+                                 std::to_wstring(n) + ext;
+                    }
+                    // SaveCfg writes to CfgPath() unconditionally; for a
+                    // copy-to-other-location we serialize + write directly.
+                    // Re-use the same WriteCfgToPath helper added below.
+                    if (WriteCfgToPath(target, s.cfg)) {
+                        std::wstring msg = L"Saved copy to "; msg += target;
+                        SetDlgItemTextW(hDlg, IDC_LABEL_PROGRESS_STATUS, msg.c_str());
+                    } else {
+                        MessageBoxW(hDlg, (L"Failed to write " + target).c_str(),
+                                    L"xways-updater", MB_OK | MB_ICONERROR);
+                    }
+                }
+                return TRUE;
+            }
+
             // Refuse close while the worker is mid-flight — the network +
             // shell-copy threads don't have a graceful cancel path. Once the
             // worker posts WM_APP_DONE the dialog re-enables Cancel and the
@@ -3052,7 +3301,10 @@ static bool DownloadUrlWithRetry(const std::wstring& url, const std::wstring& us
 // half-checked tri-state in the dialog.
 static bool RunExtrasOnly(Settings& s, std::wstring& finalInstallDir, std::wstring& err) {
     std::wstring base = s.cfg.installBase;
-    std::wstring resUser = s.cfg.dongleUser, resPass = s.cfg.donglePass;
+    // v0.1.4: extras use the active license's creds (no more dongle-only rule).
+    bool isByod = !s.pickedDongle;
+    std::wstring resUser = isByod ? s.cfg.byodUser : s.cfg.dongleUser;
+    std::wstring resPass = isByod ? s.cfg.byodPass : s.cfg.donglePass;
 
     // Pre-flight checks before we do anything expensive.
     if (!ProbeWritable(base, err)) return false;
@@ -3146,15 +3398,12 @@ static bool RunInstall(Settings& s, std::wstring& finalInstallDir, std::wstring&
     std::wstring base = s.cfg.installBase;
     bool isByod = !s.pickedDongle;
 
-    // Pick app credentials (BYOD if user picked BYOD AND has BYOD creds set)
-    std::wstring appUser, appPass;
-    if (isByod && s.cfg.hasByodCreds && !s.cfg.byodUser.empty()) {
-        appUser = s.cfg.byodUser; appPass = s.cfg.byodPass;
-    } else {
-        appUser = s.cfg.dongleUser; appPass = s.cfg.donglePass;
-    }
-    // Resources always use dongle creds.
-    std::wstring resUser = s.cfg.dongleUser, resPass = s.cfg.donglePass;
+    // v0.1.4: one cred set drives BOTH main app and extras for the active
+    // license. BYOD creds can fetch .net resources (confirmed against
+    // x-ways.net), so we no longer route extras through dongle creds.
+    std::wstring appUser = isByod ? s.cfg.byodUser : s.cfg.dongleUser;
+    std::wstring appPass = isByod ? s.cfg.byodPass : s.cfg.donglePass;
+    std::wstring resUser = appUser, resPass = appPass;
 
     // Pre-flight checks before we burn time on a multi-hundred-MB download.
     if (!ProbeWritable(s.cfg.installBase, err)) return false;

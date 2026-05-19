@@ -5,8 +5,14 @@
 // WM_INITDIALOG (matches our other X-Tension dialogs). The version combo
 // is now a plain CBS_DROPDOWNLIST (we tried CBS_OWNERDRAWFIXED but the
 // columnar look at MS Shell Dlg sizes ended up cramped — see commit notes).
+//
+// v0.1.4: Credentials collapsed to a single row. The License Type radio
+// selects which saved cred slot (dongle vs BYOD) is hydrated into the
+// fields; the group title rewrites to match. Either license can fetch the
+// matching main app AND every extra/resource on its own creds — there is
+// no longer an asymmetry where extras forcibly used dongle creds.
 
-IDD_SETTINGS DIALOGEX 0, 0, 400, 374
+IDD_SETTINGS DIALOGEX 0, 0, 400, 310
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "  Update X-Ways - Settings"
 FONT 9, "MS Shell Dlg"
@@ -17,83 +23,58 @@ BEGIN
     AUTORADIOBUTTON "X-Ways Forensics (&BYOD)",                         IDC_RADIO_BYOD,           148,  14, 130,  10
     AUTO3STATE      "Full install options",                             IDC_CHK_FULL_INSTALL,     282,  14, 110,  10
 
-    // -------- Credentials --------
-    GROUPBOX        "Credentials",                                      IDC_GROUP_CREDS,            7,  32, 386, 122
-    LTEXT           "Dongle credentials (used for the main app and all extras / resources):",
-                                                                        IDC_LABEL_DONGLE_HEADER,   14,  44, 372,   9
-    LTEXT           "Username:",                                        IDC_LABEL_DONGLE_USER,     24,  58,  46,   9
-    EDITTEXT                                                            IDC_EDIT_DONGLE_USER,      72,  56, 220,  12, ES_AUTOHSCROLL
-    LTEXT           "Password:",                                        IDC_LABEL_DONGLE_PASS,     24,  73,  46,   9
-    EDITTEXT                                                            IDC_EDIT_DONGLE_PASS,      72,  71, 178,  12, ES_AUTOHSCROLL | ES_PASSWORD
-    PUSHBUTTON      "&Show",                                            IDC_BTN_TOGGLE_DONGLE_PASS,254, 70,  34,  14
-    PUSHBUTTON      "&Test",                                            IDC_BTN_TEST_DONGLE,      292,  70,  44,  14
-
-    LTEXT           "BYOD credentials (for BYOD app only):",            IDC_LABEL_BYOD_HEADER,     14,  90, 372,   9
-    LTEXT           "BYOD user:",                                       IDC_LABEL_BYOD_USER,       24, 104,  46,   9
-    EDITTEXT                                                            IDC_EDIT_BYOD_USER,        72, 102, 220,  12, ES_AUTOHSCROLL | WS_DISABLED
-    LTEXT           "BYOD pass:",                                       IDC_LABEL_BYOD_PASS,       24, 119,  46,   9
-    EDITTEXT                                                            IDC_EDIT_BYOD_PASS,        72, 117, 178,  12, ES_AUTOHSCROLL | ES_PASSWORD | WS_DISABLED
-    PUSHBUTTON      "Show",                                             IDC_BTN_TOGGLE_BYOD_PASS, 254, 116,  34,  14, WS_DISABLED
-    PUSHBUTTON      "Test",                                             IDC_BTN_TEST_BYOD,        292, 116,  44,  14, WS_DISABLED
+    // -------- Credentials (single row; swaps slot on radio change) --------
+    GROUPBOX        "Credentials",                                      IDC_GROUP_CREDS,            7,  32, 386,  58
+    LTEXT           "Username:",                                        IDC_LABEL_USER,            14,  46,  46,   9
+    EDITTEXT                                                            IDC_EDIT_USER,             62,  44, 230,  12, ES_AUTOHSCROLL
+    LTEXT           "Password:",                                        IDC_LABEL_PASS,            14,  61,  46,   9
+    EDITTEXT                                                            IDC_EDIT_PASS,             62,  59, 188,  12, ES_AUTOHSCROLL | ES_PASSWORD
+    PUSHBUTTON      "&Show",                                            IDC_BTN_TOGGLE_PASS,      254,  58,  34,  14
+    PUSHBUTTON      "&Test",                                            IDC_BTN_TEST,             292,  58,  44,  14
     AUTOCHECKBOX    "&Remember credentials (DPAPI-encrypted, stored next to the DLL)",
-                                                                        IDC_CHK_REMEMBER_CREDS,    14, 137, 320,  10
+                                                                        IDC_CHK_REMEMBER_CREDS,    14,  76, 320,  10
 
     // -------- Select version to install (detected line + combo + refresh + beta) --
-    GROUPBOX        "Select version to install",                        IDC_GROUP_VERSION,          7, 162, 386,  44
-    // Two-label split so the prefix stays default black/regular while the
-    // value gets bold + blue (set programmatically: bold via WM_SETFONT,
-    // blue via WM_CTLCOLORSTATIC matching IDC_LABEL_DETECTED only).
-    LTEXT           "Detected current install:",                        IDC_LABEL_DETECTED_PREFIX, 14, 174,  92,   9
-    LTEXT           "",                                                 IDC_LABEL_DETECTED,       108, 174, 280,   9
-    LTEXT           "Version:",                                         IDC_LABEL_VERSION,         14, 188,  35,   9
-    COMBOBOX                                                            IDC_COMBO_VERSION,         52, 186, 200, 200, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "Refresh",                                          IDC_BTN_REFRESH_VERSIONS, 256, 185,  44,  14
-    AUTOCHECKBOX    "Include &beta versions",                           IDC_CHK_INCLUDE_BETA,     308, 188,  90,  10
+    GROUPBOX        "Select version to install",                        IDC_GROUP_VERSION,          7,  98, 386,  44
+    LTEXT           "Detected current install:",                        IDC_LABEL_DETECTED_PREFIX, 14, 110,  92,   9
+    LTEXT           "",                                                 IDC_LABEL_DETECTED,       108, 110, 280,   9
+    LTEXT           "Version:",                                         IDC_LABEL_VERSION,         14, 124,  35,   9
+    COMBOBOX                                                            IDC_COMBO_VERSION,         52, 122, 200, 200, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Refresh",                                          IDC_BTN_REFRESH_VERSIONS, 256, 121,  44,  14
+    AUTOCHECKBOX    "Include &beta versions",                           IDC_CHK_INCLUDE_BETA,     308, 124,  90,  10
 
     // -------- Install location --------
-    GROUPBOX        "Install location",                                 IDC_GROUP_INSTALL,          7, 212, 386,  40
-    LTEXT           "Install to:",                                      IDC_LABEL_INSTALL_BASE,    14, 224,  40,   9
-    EDITTEXT                                                            IDC_EDIT_INSTALL_BASE,     56, 222, 230,  12, ES_AUTOHSCROLL
-    PUSHBUTTON      "&Browse...",                                       IDC_BTN_BROWSE_INSTALL_BASE,292,221,  44,  14
-    LTEXT           "Folder name:",                                     IDC_LABEL_FOLDER_NAME,     14, 238,  45,   9
-    // Cue-banner ("blank = auto-name from detected version, e.g. xwf21-7sr3")
-    // is set programmatically via EM_SETCUEBANNER in WM_INITDIALOG.
-    EDITTEXT                                                            IDC_EDIT_FOLDER_NAME,      56, 236, 230,  12, ES_AUTOHSCROLL
-    // Red-bold "Folder already exists" — only visible when <base>\<folder>
-    // already exists on disk. Disables the Install button while shown.
-    LTEXT           "",                                                 IDC_LABEL_FOLDER_EXISTS,  292, 238, 100,   9, NOT WS_VISIBLE
+    GROUPBOX        "Install location",                                 IDC_GROUP_INSTALL,          7, 148, 386,  40
+    LTEXT           "Install to:",                                      IDC_LABEL_INSTALL_BASE,    14, 160,  40,   9
+    EDITTEXT                                                            IDC_EDIT_INSTALL_BASE,     56, 158, 230,  12, ES_AUTOHSCROLL
+    PUSHBUTTON      "&Browse...",                                       IDC_BTN_BROWSE_INSTALL_BASE,292,157,  44,  14
+    LTEXT           "Folder name:",                                     IDC_LABEL_FOLDER_NAME,     14, 174,  45,   9
+    EDITTEXT                                                            IDC_EDIT_FOLDER_NAME,      56, 172, 230,  12, ES_AUTOHSCROLL
+    LTEXT           "",                                                 IDC_LABEL_FOLDER_EXISTS,  292, 174, 100,   9, NOT WS_VISIBLE
 
     // -------- Download tools (left half, single column) --------
-    GROUPBOX        "Download tools",                                   IDC_GROUP_OPTIONAL,         7, 258, 190,  86
-    AUTOCHECKBOX    "&Viewer Component (xw_viewer.zip)",                IDC_CHK_DL_VIEWER,         14, 270, 175,  10
-    // Tri-state cycles checked -> indeterminate -> unchecked:
-    //   Checked       = SANS FOR500 Conditional Coloring.cfg (peacekeeper0/GitHub)
-    //   Indeterminate = Conditional Coloring.cfg (x-ways.net upstream)
-    //   Unchecked     = exclude Conditional Coloring.cfg (skip download)
-    // Label + tooltip update in code as the state changes.
-    AUTO3STATE      "&SANS FOR500 Conditional Coloring.cfg",            IDC_CHK_DL_COND_COLORING,  14, 284, 175,  10
-    AUTOCHECKBOX    "&AFF4 X-Tension (aff4-xways-2.1.1.zip)",           IDC_CHK_DL_AFF4,           14, 298, 175,  10
-    AUTOCHECKBOX    "&Excire (Excire.zip)",                             IDC_CHK_DL_EXCIRE,         14, 312, 175,  10
-    AUTOCHECKBOX    "&Tesseract (Tesseract.zip)",                       IDC_CHK_DL_TESSERACT,      14, 326, 175,  10
+    GROUPBOX        "Download tools",                                   IDC_GROUP_OPTIONAL,         7, 194, 190,  86
+    AUTOCHECKBOX    "&Viewer Component (xw_viewer.zip)",                IDC_CHK_DL_VIEWER,         14, 206, 175,  10
+    AUTO3STATE      "&SANS FOR500 Conditional Coloring.cfg",            IDC_CHK_DL_COND_COLORING,  14, 220, 175,  10
+    AUTOCHECKBOX    "&AFF4 X-Tension (aff4-xways-2.1.1.zip)",           IDC_CHK_DL_AFF4,           14, 234, 175,  10
+    AUTOCHECKBOX    "&Excire (Excire.zip)",                             IDC_CHK_DL_EXCIRE,         14, 248, 175,  10
+    AUTOCHECKBOX    "&Tesseract (Tesseract.zip)",                       IDC_CHK_DL_TESSERACT,      14, 262, 175,  10
 
     // -------- Copy from current install (right half) — shortcut nested at the bottom
-    GROUPBOX        "Copy from current install",                        IDC_GROUP_COPY,           203, 258, 190,  86
-    AUTOCHECKBOX    "Copy custom configs",                              IDC_CHK_COPY_CFG,         210, 270, 175,  10
-    AUTOCHECKBOX    "Copy hash database folders (HashDB, HashDB 2)",    IDC_CHK_COPY_HASHDB,      210, 284, 175,  10
-    AUTOCHECKBOX    "Copy x-tensions folder",                           IDC_CHK_COPY_XTENSIONS,   210, 298, 175,  10
-    AUTOCHECKBOX    "Create desktop &shortcut to new install",          IDC_CHK_CREATE_SHORTCUT,  210, 326, 175,  10
+    GROUPBOX        "Copy from current install",                        IDC_GROUP_COPY,           203, 194, 190,  86
+    AUTOCHECKBOX    "Copy custom configs",                              IDC_CHK_COPY_CFG,         210, 206, 175,  10
+    AUTOCHECKBOX    "Copy hash database folders (HashDB, HashDB 2)",    IDC_CHK_COPY_HASHDB,      210, 220, 175,  10
+    AUTOCHECKBOX    "Copy x-tensions folder",                           IDC_CHK_COPY_XTENSIONS,   210, 234, 175,  10
+    AUTOCHECKBOX    "Create desktop &shortcut to new install",          IDC_CHK_CREATE_SHORTCUT,  210, 262, 175,  10
 
     // -------- Action buttons --------
-    // Progress bar + status label live in the gap between "Open install folder"
-    // and "Install" — both initially hidden, shown by the dialog while the
-    // worker thread is actively downloading/installing.
-    LTEXT           "",                                                 IDC_LABEL_PROGRESS_STATUS, 158, 346, 120,   9, NOT WS_VISIBLE
+    LTEXT           "",                                                 IDC_LABEL_PROGRESS_STATUS, 158, 282, 120,   9, NOT WS_VISIBLE
     CONTROL         "",                                                 IDC_PROGRESS_INSTALL,
-                    "msctls_progress32",                                PBS_SMOOTH | WS_CHILD,    158, 357, 120,   8
-    PUSHBUTTON      "&About...",                                        IDC_BTN_ABOUT,              7, 354,  50,  14
-    PUSHBUTTON      "&Open install folder",                             IDC_BTN_OPEN_FOLDER,       63, 354,  90,  14
-    DEFPUSHBUTTON   "&Install",                                         IDC_BTN_INSTALL,          283, 354,  50,  14
-    PUSHBUTTON      "Cancel",                                           IDCANCEL,                 339, 354,  50,  14
+                    "msctls_progress32",                                PBS_SMOOTH | WS_CHILD,    158, 293, 120,   8
+    PUSHBUTTON      "&About...",                                        IDC_BTN_ABOUT,              7, 290,  50,  14
+    PUSHBUTTON      "&Open install folder",                             IDC_BTN_OPEN_FOLDER,       63, 290,  90,  14
+    DEFPUSHBUTTON   "&Install",                                         IDC_BTN_INSTALL,          283, 290,  50,  14
+    PUSHBUTTON      "Cancel",                                           IDCANCEL,                 339, 290,  50,  14
 END
 
 // =============================================================================
@@ -104,17 +85,13 @@ STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMEN
 CAPTION "About xways-updater"
 FONT 9, "MS Shell Dlg"
 BEGIN
-    LTEXT     "xways-updater 0.1.3",                            IDC_ABOUT_TITLE,        12,  10, 256, 12
+    LTEXT     "xways-updater 0.1.4",                            IDC_ABOUT_TITLE,        12,  10, 256, 12
     LTEXT     "X-Tension installer/updater for X-Ways Forensics.", IDC_ABOUT_DESC,      12,  26, 256,  9
-    // "Author:" prefix is bolded programmatically; the value control fills
-    // the rest of the row so we get bold prefix + regular value on one line.
     LTEXT     "Author:",                                        IDC_ABOUT_LABEL_AUTHOR_PREFIX, 12, 44,  30, 9
     LTEXT     "Kevin Stokes - Digital Detective and Cyber Sleuth",
                                                                 IDC_ABOUT_AUTHOR,       44,  44, 224,  9
     PUSHBUTTON "https://github.com/kev365/xways-updater",       IDC_ABOUT_LINK_GITHUB,  12,  58, 256, 14
     PUSHBUTTON "https://www.linkedin.com/in/dfir-kev",          IDC_ABOUT_LINK_LINKEDIN,12,  76, 256, 14
-    // Coffee button text is set programmatically in WM_INITDIALOG so we can
-    // include the ♥ U+2665 hearts without relying on rc.exe's codepage.
     PUSHBUTTON "Buy me a coffee",                               IDC_ABOUT_BTN_COFFEE,   12,  96, 256, 14
     DEFPUSHBUTTON "OK",                                         IDOK,                  218, 120,  50, 14
 END

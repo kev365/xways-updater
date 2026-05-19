@@ -38,14 +38,48 @@ X-Ways install as an X-tension.
 
 ## Authentication
 
-- **Dongle creds** — used for the dongle app (`/xwf/`) AND every resource
-  (`/res/...`).
-- **BYOD creds** — used only for the BYOD app (`/xwb/`). Resources still go
-  through the dongle creds. The BYOD username/password fields are enabled
-  whenever the BYOD radio is selected.
+Every download uses **HTTP Basic** auth on `x-ways.net` (resources, dongle
+app, BYOD-app metadata via `.net` too where applicable) and `x-ways.com`
+(BYOD app zip). The realm is _"Latest password from x-ways.net/license.html"_
+— the same username/password X-Ways prompts you for in a browser.
+
+Either license can fetch everything on its own credentials. The dialog
+shows a **single** Username + Password row; the License Type radio above it
+picks which set you're editing:
+
+- Select **Dongle** → fields show your saved Dongle credentials. They drive
+  the dongle main app (`/xwf/...`) and every resource (`/res/...`).
+- Select **BYOD** → fields show your saved BYOD credentials. They drive the
+  BYOD main app (`/xwb/...`) and every resource — the BYOD set works against
+  `/res/` too.
+
+The group title rewrites to "Dongle credentials" / "BYOD credentials" so
+the active slot is always clear. Switching the License radio mid-dialog
+auto-loads the saved creds for that license, or clears the row when
+nothing is saved for it. Typed-but-not-saved input in the previous
+license's row is discarded on swap — only **Install** and **Test with
+Remember on** commit the visible row to disk.
+
+### When are creds saved?
+
+| Action | Creds saved? |
+| --- | --- |
+| **Test** (Remember off) | No — diagnostic only |
+| **Test** (Remember on, 200) | Yes — captured into the active slot and written to `xways-updater.cfg` immediately |
+| **Test** (Remember on, 4xx/5xx) | No — invalid creds aren't persisted |
+| **Install** (successful) | Yes — the active slot's typed creds are written before the worker runs |
+| **Shift+Install** | Yes — writes the current dialog state to `xways-updater.cfg` without running the install |
 
 Credentials can be remembered next to the DLL via DPAPI (per-Windows-user
-ciphertext) in the sidecar file (`xways-updater.cfg`).
+ciphertext). Both slots are persisted independently — if you have only one
+license, the other slot just stays empty. Toggle Remember off to avoid
+persisting either. The sidecar file (`xways-updater.cfg`) is gitignored by
+default — even DPAPI ciphertext is yours, not something to redistribute.
+
+Empty username/password fields trigger the same "Credentials needed"
+prompt + field flash across **Test**, **Install**, and the version
+**Refresh** button — short-circuits the HTTP call so the server isn't
+asked to authenticate a blank request.
 
 ## Install
 
