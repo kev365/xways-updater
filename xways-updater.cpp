@@ -60,7 +60,7 @@
 
 // --- Identity ---------------------------------------------------------------
 static const wchar_t* NAME        = L"xways-updater";
-static const wchar_t* VERSION     = L"0.1.4";
+static const wchar_t* VERSION     = L"0.1.5";
 static const wchar_t* DESCRIPTION = L"Download and install X-Ways Forensics (Dongle or BYOD) plus optional resources.";
 
 // Verbose per-file/per-step diagnostics. Off by default for shipped builds —
@@ -96,7 +96,7 @@ static const wchar_t* URL_AFF4            = L"https://www.x-ways.net/res/aff4-xw
 static const wchar_t* URL_COND_COLORING_UPSTREAM = L"https://www.x-ways.net/res/conditional%20coloring/Conditional%20Coloring.cfg";
 static const wchar_t* URL_COND_COLORING_SANS     = L"https://raw.githubusercontent.com/peacekeeper0/X-Ways-Forensics/main/Conditional%20Coloring.cfg";
 
-static const wchar_t* USER_AGENT          = L"xways-updater/0.1.4 (X-Tension)";
+static const wchar_t* USER_AGENT          = L"xways-updater/0.1.5 (X-Tension)";
 
 // Tri-state values for the cond coloring checkbox. Map to Win32 BST_* in the
 // dialog code: CCC_NONE = BST_UNCHECKED, CCC_UPSTREAM = BST_INDETERMINATE,
@@ -896,10 +896,15 @@ static std::vector<IndexEntry> ParseAppIndex(const std::string& html, bool isByo
     return out;
 }
 
-// --- Zip extraction (tar.exe) ----------------------------------------------
-//   bsdtar shipped in C:\Windows\System32\tar.exe handles zip archives since
-//   Windows 10 1803. Cleaner than COM IShellDispatch and avoids a third-party
-//   library dep.
+// --- Zip extraction (tar.exe with PowerShell Expand-Archive fallback) -----
+//   Preferred extractor: bsdtar at C:\Windows\System32\tar.exe — shipped in
+//   Windows 10 1803 / Server 2019 and later. Fast, no .NET load, handles
+//   .zip files as well as .tar.* via a single binary.
+//   Fallback extractor: powershell.exe -Command "Expand-Archive ..." —
+//   PowerShell 5.1 ships in every Windows 10 release AND in Windows Server
+//   2016 (which DOES NOT ship tar.exe). Slower startup (~0.5–1 s for the
+//   PS host to spin up) but no extra dependency. Net effect: ExtractZip
+//   works on every supported Microsoft OS still capable of running X-Ways.
 static bool ExtractZip(const std::wstring& zipPath, const std::wstring& destDir, std::wstring& errOut) {
     if (!CreateDirectoryW(destDir.c_str(), nullptr)) {
         DWORD err = GetLastError();
@@ -909,39 +914,95 @@ static bool ExtractZip(const std::wstring& zipPath, const std::wstring& destDir,
             return false;
         }
     }
-    wchar_t sysDir[MAX_PATH] = {0};
-    GetSystemDirectoryW(sysDir, MAX_PATH);
-    std::wstring tarExe = std::wstring(sysDir) + L"\\tar.exe";
-    if (!FileExists(tarExe)) {
-        errOut = L"tar.exe not found in System32 (need Windows 10 1803+)";
-        return false;
-    }
-    std::wstring cmd = L"\"" + tarExe + L"\" -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
 
-    STARTUPINFOW si{}; si.cb = sizeof(si);
-    si.dwFlags     = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi{};
-    std::vector<wchar_t> cmdline(cmd.begin(), cmd.end());
-    cmdline.push_back(L'\0');
-    if (!CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        DWORD err = GetLastError();
-        wchar_t buf[64]; swprintf_s(buf, L"CreateProcess(tar) failed (%lu)", err);
-        errOut = buf;
+    // Spawn a hidden synchronous child process; return its exit code as
+    // success/failure + a short error string on failure.
+    auto runHidden = [](const std::wstring& cmd, std::wstring& err) -> bool {
+        STARTUPINFOW si{}; si.cb = sizeof(si);
+        si.dwFlags     = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> cmdline(cmd.begin(), cmd.end());
+        cmdline.push_back(L'\0');
+        if (!CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            DWORD e = GetLastError();
+            wchar_t buf[80]; swprintf_s(buf, L"CreateProcess failed (%lu)", e);
+            err = buf;
+            return false;
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        if (code != 0) {
+            wchar_t buf[64]; swprintf_s(buf, L"exited with code %lu", code);
+            err = buf;
+            return false;
+        }
+        return true;
+    };
+
+    wchar_t sysDirBuf[MAX_PATH] = {0};
+    GetSystemDirectoryW(sysDirBuf, MAX_PATH);
+    std::wstring sysDir = sysDirBuf;
+
+    // 1) tar.exe
+    std::wstring tarErr;
+    std::wstring tarExe = sysDir + L"\\tar.exe";
+    if (FileExists(tarExe)) {
+        std::wstring cmd = L"\"" + tarExe + L"\" -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
+        if (runHidden(cmd, tarErr)) return true;
+        // tar present but failed (corrupt archive, permission, etc.) — fall
+        // through to PowerShell as a sanity-check second attempt.
+        Log(L"  ExtractZip: tar.exe present but failed (" + tarErr + L"); trying PowerShell Expand-Archive...");
+    }
+
+    // 2) PowerShell Expand-Archive. Inner PS string literals use single
+    // quotes (literal in PS); we escape any embedded single quote by doubling.
+    std::wstring psExe = sysDir + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+    if (FileExists(psExe)) {
+        auto escSingle = [](const std::wstring& s) {
+            std::wstring out;
+            out.reserve(s.size() + 4);
+            for (wchar_t c : s) {
+                if (c == L'\'') out.push_back(L'\'');
+                out.push_back(c);
+            }
+            return out;
+        };
+        std::wstring psBody =
+            L"Expand-Archive -LiteralPath '" + escSingle(zipPath) +
+            L"' -DestinationPath '"          + escSingle(destDir) +
+            L"' -Force";
+        std::wstring cmd = L"\"" + psExe +
+            L"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"" +
+            psBody + L"\"";
+        std::wstring psErr;
+        if (runHidden(cmd, psErr)) {
+            if (!tarErr.empty()) {
+                Log(L"  ExtractZip: recovered via PowerShell Expand-Archive after tar.exe failure.");
+            } else {
+                Log(L"  ExtractZip: tar.exe not present in System32; used PowerShell Expand-Archive.");
+            }
+            return true;
+        }
+        if (!tarErr.empty()) {
+            errOut = L"both extractors failed — tar: " + tarErr + L"; powershell Expand-Archive: " + psErr;
+        } else {
+            errOut = L"tar.exe not present; powershell Expand-Archive failed: " + psErr;
+        }
         return false;
     }
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    if (code != 0) {
-        wchar_t buf[64]; swprintf_s(buf, L"tar exited with code %lu", code);
-        errOut = buf;
-        return false;
+
+    // Neither tool is present (very old Windows or a stripped-down image).
+    if (!tarErr.empty()) {
+        errOut = L"tar.exe failed (" + tarErr + L") and powershell.exe not found in System32";
+    } else {
+        errOut = L"no zip extractor available — neither tar.exe nor powershell.exe is present in System32";
     }
-    return true;
+    return false;
 }
 
 // --- VERSIONINFO reader -----------------------------------------------------

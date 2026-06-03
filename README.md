@@ -31,8 +31,9 @@ X-Ways install as an X-tension.
 
 ## Requirements
 
-- **Windows (x64).** Should work on any 64-bit Windows that runs X-Ways
-  (Win 10, Win 11, Windows Server). Only x64 is tested.
+- **Windows 10 / 11 / Server 2016 or newer** (x64). Uses the in-box
+  `tar.exe` when present; otherwise falls back to PowerShell
+  `Expand-Archive`.
 - **X-Ways Forensics x64** - only tested for 21.0 or newer, x64 only.
 - **A valid X-Ways license** - Dongle or BYOD license.
 
